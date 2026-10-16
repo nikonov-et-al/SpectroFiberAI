@@ -1,0 +1,26 @@
+[
+  {
+    "id": "food_moisture",
+    "title": "Synthetic: Food moisture",
+    "problem": "We want to measure moisture in food powder.\nIndustry: food processing\nConcentration range: 2-15 % mass fraction (synthetic requirement)\nTemperature: 20-30 C\nPressure: ambient\nState: powder\nFrequency: once per batch\nConstraints: laboratory screening before process installation",
+    "expected_methods": ["NIR"]
+  },
+  {
+    "id": "polymer_identity",
+    "title": "Synthetic: Polymer identification",
+    "problem": "We want to identify polymers in polymer pellets.\nIndustry: plastics recycling\nObjective: identify molecular composition\nTarget: polymer identity\nMatrix: polymer pellets\nState: solid\nConstraints: begin with offline samples",
+    "expected_methods": ["Raman", "MIR/FTIR"]
+  },
+  {
+    "id": "fluorescent_dye",
+    "title": "Synthetic: Fluorescent dye in water",
+    "problem": "We want to quantify fluorescent dye in water.\nIndustry: water process research\nObjective: measure fluorescence\nTarget: fluorescent dye\nMatrix: water\nState: liquid\nConcentration range: unknown\nAccuracy: TBD",
+    "expected_methods": ["Fluorescence"]
+  },
+  {
+    "id": "underspecified",
+    "title": "Synthetic: Underspecified industrial monitoring",
+    "problem": "We need better industrial monitoring. What sensor should we use?",
+    "expected_methods": []
+  }
+]

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spectro-ai"
+version = "0.1.0"
+description = "Transparent spectroscopy use-case assessment for hackathon experiments"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "streamlit>=1.50,<2",
+    "pydantic>=2.12,<3",
+    "pyyaml>=6.0.3,<7",
+]
+
+[project.optional-dependencies]
+llm = ["openai>=2,<3"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.14,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spectro_ai"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"knowledge/techniques.yaml" = "spectro_ai/data/techniques.yaml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+extend-exclude = [".tools", ".cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

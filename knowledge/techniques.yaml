@@ -1,0 +1,87 @@
+schema_version: 1
+techniques:
+  - id: raman
+    method: Raman
+    spectral_region: Raman shift; excitation wavelength undetermined
+    principle: Inelastic light scattering can reveal molecular vibrational information.
+    common_applications: [Molecular identification, Material fingerprint comparison]
+    typical_limitations: [Fluorescence background can obscure response, Local heating may affect samples]
+    sample_considerations: [Check sample response and representativeness before choosing illumination]
+    possible_geometries: [Backscattering, Transmission]
+    supporting_evidence:
+      - kind: verified_source
+        statement: Manufacturer overview describes vibrational Raman scattering and fluorescence/heating limitations.
+        source_title: Thermo Fisher - A Complete Vibrational Spectroscopy Solution
+        source_url: https://assets.thermofisher.com/TFS-Assets/CAD/Application-Notes/versatility-is50-ftir-spectrometer-an1107-en.pdf
+        checked_on: '2026-10-15'
+      - kind: engineering_heuristic
+        statement: Application and geometry options are screening notes, not a customer-specific configuration.
+    expert_review_required: true
+  - id: nir
+    method: NIR
+    spectral_region: Near infrared; exact bands undetermined
+    principle: Vibrational overtones and combination bands can support bulk-property calibration.
+    common_applications: [Moisture estimation, Bulk composition screening]
+    typical_limitations: [Broad overlapping bands complicate interpretation, Calibration may require chemometrics]
+    sample_considerations: [Evaluate matrix variability and sample presentation using representative samples]
+    possible_geometries: [Diffuse reflectance, Transmission]
+    supporting_evidence:
+      - kind: verified_source
+        statement: Manufacturer overview describes overlapping NIR bands and bulk-property analysis including moisture.
+        source_title: Thermo Fisher - A Complete Vibrational Spectroscopy Solution
+        source_url: https://assets.thermofisher.com/TFS-Assets/CAD/Application-Notes/versatility-is50-ftir-spectrometer-an1107-en.pdf
+        checked_on: '2026-10-15'
+      - kind: engineering_heuristic
+        statement: Customer applicability requires representative calibration and independent validation.
+    expert_review_required: true
+  - id: mir
+    method: MIR/FTIR
+    spectral_region: Mid infrared; exact bands undetermined
+    principle: Infrared absorption patterns provide molecular fingerprint information.
+    common_applications: [Material identification, Polymer and organic compound analysis]
+    typical_limitations: [Sampling geometry must suit the material, ATR requires appropriate sample contact]
+    sample_considerations: [Assess optical access and compatibility of sample and sampling accessory]
+    possible_geometries: [Transmission, Attenuated total reflection, Diffuse reflectance]
+    supporting_evidence:
+      - kind: verified_source
+        statement: Manufacturer education describes IR fingerprints, polymer applications, and sampling geometries.
+        source_title: Thermo Fisher - FTIR Spectroscopy Academy
+        source_url: https://www.thermofisher.com/de/en/home/industrial/spectroscopy-elemental-isotope-analysis/molecular-spectroscopy/fourier-transform-infrared-spectroscopy/resources/ftir-spectroscopy-academy.html
+        checked_on: '2026-10-15'
+      - kind: engineering_heuristic
+        statement: Sampling notes require expert review against the actual material and instrument.
+    expert_review_required: true
+  - id: uv_vis
+    method: UV-Vis
+    spectral_region: Ultraviolet and visible; exact bands undetermined
+    principle: Optical absorption/transmission can probe electronic transitions and sample response.
+    common_applications: [Absorbance measurement, Color characterization]
+    typical_limitations: [Optical path and reference must be defined, Matrix effects can complicate interpretation]
+    sample_considerations: [Check blank response and sample clarity before assuming absorbance is target-specific]
+    possible_geometries: [Transmission, Reflectance]
+    supporting_evidence:
+      - kind: verified_source
+        statement: Manufacturer tutorial explains transmitted/reference light, absorbance, and reflection/color measurements.
+        source_title: JASCO - Basics of absorption spectroscopy
+        source_url: https://www.jasco-global.com/principle/principles-of-uv-vis-spectroscopy-2-basics-of-absorption-spectroscopy/
+        checked_on: '2026-10-15'
+      - kind: engineering_heuristic
+        statement: Matrix, blank, and target-specificity checks are provisional experimental guidance.
+    expert_review_required: true
+  - id: fluorescence
+    method: Fluorescence
+    spectral_region: Excitation/emission regions undetermined
+    principle: Measure emitted light following optical excitation of a fluorescent species.
+    common_applications: [Fluorescent target monitoring, Fluorescent labeling studies]
+    typical_limitations: [Response depends on molecular environment, Fluorescent target or label is required]
+    sample_considerations: [Evaluate pH and temperature effects with representative matrix controls]
+    possible_geometries: [Right-angle collection]
+    supporting_evidence:
+      - kind: verified_source
+        statement: Manufacturer tutorial explains fluorescence collection, labeling, and environmental dependence.
+        source_title: JASCO - Features of fluorescence spectroscopy
+        source_url: https://www.jasco-global.com/principle/principles-of-fluorescence-spectroscopy-2-features-of-fluorescence-spectroscopy/
+        checked_on: '2026-10-15'
+      - kind: engineering_heuristic
+        statement: A fluorescence keyword is only a screening trigger, not evidence of measurable selectivity.
+    expert_review_required: true
