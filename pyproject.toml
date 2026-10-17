@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["openai>=2,<3"]
+rag = ["numpy>=2.3,<3", "pypdf>=6,<7"]
 
 [dependency-groups]
 dev = ["pytest>=9,<10", "ruff>=0.14,<1"]
@@ -25,6 +26,7 @@ packages = ["src/spectro_ai"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "knowledge/techniques.yaml" = "spectro_ai/data/techniques.yaml"
+"prompts" = "spectro_ai/data/prompts"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

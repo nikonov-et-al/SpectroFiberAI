@@ -1,0 +1,71 @@
+schema_version: 1
+root: data/materials
+excluded_files:
+  - AFS_Examples_and_Reference.docx
+  - customer_scenarios_for_final_evaluation.txt
+sources:
+  - source_id: S01
+    filename: S01_Multispectral_Laboratory.pdf
+    title: Multispectral Laboratory
+    source_type: technical_reference
+    scope: technical
+    review_status: needs_page_review
+    citation_format: S01 p.{page}
+    page_review:
+      "5": reviewed_for_phase2
+      "6": needs_afs_review
+      "7": reviewed_for_phase2
+      "8": reviewed_for_phase2
+      "9": reviewed_for_phase2
+      "10": reviewed_for_phase2
+      "11": reviewed_for_phase2
+      "12": reviewed_for_phase2
+      "13": reviewed_for_phase2
+      "14": reviewed_for_phase2
+      "15": reviewed_for_phase2
+      "16": reviewed_for_phase2
+      "17": reviewed_for_phase2
+      "18": reviewed_for_phase2
+  - source_id: S01
+    filename: AFS_method_comparison_table.xlsx
+    title: AFS method comparison table transcription
+    source_type: secondary_transcription
+    scope: secondary_transcription
+    review_status: transcription_pending_afs_review
+    related_source: S01 p.6
+    citation_format: "AFS_method_comparison_table.xlsx, worksheet={sheet}, rows={start}-{end}"
+  - source_id: S02
+    filename: S02_AFS_Process_Control_Slides.pdf
+    title: AFS Process Control Slides
+    source_type: technical_reference
+    scope: technical
+    review_status: needs_visual_review
+    citation_format: S02 p.{page}
+  - source_id: S03
+    filename: S03_LED_Kidney_Study_2017.pdf
+    title: LED kidney study 2017
+    source_type: research_paper
+    scope: technical
+    review_status: needs_source_review
+    citation_format: S03 p.{page}
+  - source_id: S04
+    filename: S04_Combi_MIR_Fluorescence_2021.pdf
+    title: Combined MIR fluorescence study 2021
+    source_type: research_paper
+    scope: technical
+    review_status: needs_source_review
+    citation_format: S04 p.{page}
+  - source_id: S05
+    filename: S05_AFS_Flyer.pdf
+    title: AFS flyer
+    source_type: business_context
+    scope: business_context
+    review_status: needs_source_review
+    citation_format: S05 p.{page}
+  - source_id: S06
+    filename: S06_Laboratory_Link.txt
+    title: AFS laboratory link pointer
+    source_type: web_reference_pointer
+    scope: business_context
+    review_status: pointer_only_not_retrieved
+    citation_format: S06 lines {start}-{end}

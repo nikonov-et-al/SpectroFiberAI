@@ -1,6 +1,6 @@
 import pytest
 
-from spectro_ai.baseline import assess, extract_use_case, missing_fields
+from spectro_ai.baseline import QUESTIONS, assess, extract_use_case, missing_fields
 from spectro_ai.models import AssessmentReport, CustomerUseCase
 from spectro_ai.reporting import render_markdown
 
@@ -66,8 +66,8 @@ def test_each_missing_critical_requirement_prevents_candidates(missing: str) -> 
 def test_sparse_input_abstains(text: str) -> None:
     report = assess(extract_use_case(text))
     assert report.status == "insufficient_information"
-    assert len(report.missing_information) == 11
-    assert len(report.suggested_technical_questions) == 11
+    assert len(report.missing_information) == len(QUESTIONS)
+    assert len(report.suggested_technical_questions) == 3
     assert not report.candidate_techniques
 
 

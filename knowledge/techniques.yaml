@@ -13,9 +13,16 @@ techniques:
         statement: Manufacturer overview describes vibrational Raman scattering and fluorescence/heating limitations.
         source_title: Thermo Fisher - A Complete Vibrational Spectroscopy Solution
         source_url: https://assets.thermofisher.com/TFS-Assets/CAD/Application-Notes/versatility-is50-ftir-spectrometer-an1107-en.pdf
-        checked_on: '2026-10-15'
+        checked_on: '2026-10-16'
       - kind: engineering_heuristic
         statement: Application and geometry options are screening notes, not a customer-specific configuration.
+      - kind: verified_source
+        statement: Manufacturer comparison describes aqueous Raman identification as dependent on a Raman-responsive target; an aqueous matrix alone does not establish detectability.
+        source_title: Thermo Fisher - How Water Affects Raman and FTIR Identification
+        source_url: https://www.thermofisher.com/blog/identifying-threats/how-water-affects-raman-and-ftir-identification-of-unknown-substances/
+        checked_on: '2026-10-16'
+      - kind: engineering_heuristic
+        statement: Aqueous ethanol and reaction-progress rules propose a Raman/MIR laboratory comparison only; no analyte-specific sensitivity or process compatibility has been established.
     expert_review_required: true
   - id: nir
     method: NIR
@@ -30,7 +37,7 @@ techniques:
         statement: Manufacturer overview describes overlapping NIR bands and bulk-property analysis including moisture.
         source_title: Thermo Fisher - A Complete Vibrational Spectroscopy Solution
         source_url: https://assets.thermofisher.com/TFS-Assets/CAD/Application-Notes/versatility-is50-ftir-spectrometer-an1107-en.pdf
-        checked_on: '2026-10-15'
+        checked_on: '2026-10-16'
       - kind: engineering_heuristic
         statement: Customer applicability requires representative calibration and independent validation.
     expert_review_required: true
@@ -50,6 +57,11 @@ techniques:
         checked_on: '2026-10-15'
       - kind: engineering_heuristic
         statement: Sampling notes require expert review against the actual material and instrument.
+      - kind: verified_source
+        statement: Manufacturer comparison describes strong water IR absorption and weaker water Raman response; aqueous target detection still requires measurement.
+        source_title: Thermo Fisher - How Water Affects Raman and FTIR Identification
+        source_url: https://www.thermofisher.com/blog/identifying-threats/how-water-affects-raman-and-ftir-identification-of-unknown-substances/
+        checked_on: '2026-10-16'
     expert_review_required: true
   - id: uv_vis
     method: UV-Vis

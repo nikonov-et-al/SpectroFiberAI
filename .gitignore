@@ -13,6 +13,8 @@ dist/
 !.env.example
 .streamlit/secrets.toml
 reports/
+documents/
+docs_schubKI/
 knowledge/data/materials/*
 !knowledge/data/materials/.gitkeep
 *.log

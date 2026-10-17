@@ -1,7 +1,7 @@
 """Domain types; no UI or model-provider dependencies."""
 
 from datetime import date
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
@@ -42,8 +42,40 @@ class DomainModel(BaseModel):
         return value
 
 
+CUSTOMER_FACT_FIELDS = (
+    "industry",
+    "measurement_objective",
+    "target_analyte_or_property",
+    "sample_matrix",
+    "concentration_range",
+    "temperature",
+    "pressure",
+    "physical_state",
+    "required_accuracy",
+    "measurement_frequency",
+    "installation_constraints",
+    "process",
+    "measurement_location",
+    "composition",
+    "detection_limit",
+    "deployment_mode",
+    "interference",
+    "flow",
+    "moisture",
+    "turbidity",
+    "particle_effects",
+    "contamination_fouling",
+    "access_cleaning",
+    "response_time",
+    "reference_measurement",
+    "desired_stage",
+)
+
+
 class CustomerUseCase(DomainModel):
+    FACT_FIELDS: ClassVar[tuple[str, ...]] = CUSTOMER_FACT_FIELDS
     source_text: Annotated[str, StringConstraints(strip_whitespace=False)] | None = None
+    request_id: str | None = None
     industry: str | None = None
     measurement_objective: str | None = None
     target_analyte_or_property: str | None = None
@@ -55,7 +87,30 @@ class CustomerUseCase(DomainModel):
     required_accuracy: str | None = None
     measurement_frequency: str | None = None
     installation_constraints: str | None = None
+    process: str | None = None
+    measurement_location: str | None = None
+    composition: str | None = None
+    detection_limit: str | None = None
+    deployment_mode: str | None = None
+    interference: str | None = None
+    flow: str | None = None
+    moisture: str | None = None
+    turbidity: str | None = None
+    particle_effects: str | None = None
+    contamination_fouling: str | None = None
+    access_cleaning: str | None = None
+    response_time: str | None = None
+    reference_measurement: str | None = None
+    desired_stage: str | None = None
+    customer_preferences: list[str] = Field(default_factory=list)
+    strict_requirements: list[str] = Field(default_factory=list)
+    field_quotes: dict[str, str] = Field(default_factory=dict)
+    field_provenance: dict[str, str] = Field(default_factory=dict)
     unknown_or_missing_information: list[str] = Field(default_factory=list)
+    ambiguities: list[str] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    extraction_mode: Literal["offline", "ollama"] = "offline"
+    extraction_warnings: list[str] = Field(default_factory=list)
 
 
 class Evidence(DomainModel):
@@ -96,6 +151,7 @@ class TechniqueCandidate(DomainModel):
     limitations: list[str] = Field(default_factory=list)
     required_assumptions: list[str] = Field(default_factory=list)
     supporting_evidence: list[Evidence] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
     preliminary_suitability_assessment: Literal["provisional_candidate", "undetermined"] = (
         "undetermined"
     )
@@ -112,6 +168,20 @@ class FeasibilityPlan(DomainModel):
     evaluation_metrics: list[str] = Field(default_factory=list)
     expected_limitations: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    proposed_configuration: str | None = None
+    success_actions: list[str] = Field(default_factory=list)
+    failure_actions: list[str] = Field(default_factory=list)
+
+
+class RetrievedEvidence(DomainModel):
+    evidence_id: str
+    source_id: str
+    document_version: str | None = None
+    page_or_section: str | None = None
+    excerpt: str
+    review_status: str
+    retrieval_score: float | None = None
+    source_scope: str | None = None
 
 
 class AssessmentReport(DomainModel):
@@ -122,5 +192,18 @@ class AssessmentReport(DomainModel):
     recommendation_rationale: str | None = None
     proposed_feasibility_experiment: FeasibilityPlan
     assumptions_and_uncertainties: list[str] = Field(default_factory=list)
-    status: Literal["insufficient_information", "provisional_candidates", "no_rule_match"]
-    assessment_method: Literal["deterministic_baseline"] = "deterministic_baseline"
+    status: Literal[
+        "insufficient_information",
+        "provisional_candidates",
+        "no_rule_match",
+        "provisional",
+        "outside_supported_scope",
+    ]
+    assessment_method: Literal[
+        "deterministic_baseline", "ollama_grounded", "offline_fallback", "evidence_abstention"
+    ] = "deterministic_baseline"
+    assessment_provider: Literal["baseline", "ollama"] | None = "baseline"
+    evidence_set_version: str | None = None
+    retrieved_evidence: list[RetrievedEvidence] = Field(default_factory=list)
+    report_version: str = "baseline-v1"
+    assessment_warnings: list[str] = Field(default_factory=list)

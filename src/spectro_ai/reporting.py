@@ -3,7 +3,7 @@
 import html
 import re
 
-from spectro_ai.models import AssessmentReport, CustomerUseCase
+from spectro_ai.models import CUSTOMER_FACT_FIELDS, AssessmentReport
 
 
 def _safe(value: object) -> str:
@@ -20,7 +20,21 @@ def render_markdown(report: AssessmentReport) -> str:
     lines = [
         "# Spectroscopy assessment",
         "",
-        "**Provisional deterministic baseline. Expert verification required.**",
+        (
+            "**Local evidence-grounded assessment; provisional and expert review required.**"
+            if report.assessment_method == "ollama_grounded"
+            else "**Limited deterministic fallback; no grounded assessment was completed.**"
+            if report.assessment_method == "offline_fallback"
+            else "**Assessment abstained because source evidence was insufficient.**"
+            if report.assessment_method == "evidence_abstention"
+            else "**Offline literal extraction and deterministic assessment. "
+            "Expert review required.**"
+        ),
+        "",
+        f"Assessment method: **{_safe(report.assessment_method)}** · provider "
+        f"**{_safe(report.assessment_provider or 'not run')}** · report "
+        f"{_safe(report.report_version)}",
+        f"Extraction mode: **{_safe(case.extraction_mode)}**",
         "",
         f"Status: **{report.status.replace('_', ' ')}**",
         "",
@@ -29,10 +43,21 @@ def render_markdown(report: AssessmentReport) -> str:
         "| Field | Supplied or recognized value |",
         "| --- | --- |",
     ]
-    for field in CustomerUseCase.model_fields:
-        if field not in {"source_text", "unknown_or_missing_information"}:
-            value = getattr(case, field)
-            lines.append(f"| {field.replace('_', ' ').title()} | {_safe(value or 'Unknown')} |")
+    for field in (*CUSTOMER_FACT_FIELDS, "customer_preferences", "strict_requirements"):
+        value = getattr(case, field)
+        if isinstance(value, list):
+            display = "; ".join(value) or "None stated"
+        else:
+            display = value or "Unknown"
+        lines.append(f"| {field.replace('_', ' ').title()} | {_safe(display)} |")
+    lines += ["", "## Field provenance", ""] + _bullets(
+        [f"{field}: {origin}" for field, origin in case.field_provenance.items()]
+    )
+    lines += ["", "## Supporting customer quotes", ""] + _bullets(
+        [f"{field}: {quote}" for field, quote in case.field_quotes.items()]
+    )
+    lines += ["", "## Extraction warnings", ""] + _bullets(case.extraction_warnings)
+    lines += ["", "## Assessment warnings", ""] + _bullets(report.assessment_warnings)
     lines += ["", "## Original customer text", ""]
     source = case.source_text or "No input supplied."
     # A longer fence safely contains arbitrary customer backticks.
@@ -41,6 +66,7 @@ def render_markdown(report: AssessmentReport) -> str:
     lines += ["", "## Missing information", ""] + _bullets(report.missing_information)
     lines += ["", "## Follow-up questions", ""] + _bullets(report.suggested_technical_questions)
     lines += ["", "## Preliminary candidates", "", _safe(report.recommendation_rationale), ""]
+    evidence_by_id = {item.evidence_id: item for item in report.retrieved_evidence}
     for candidate in report.candidate_techniques:
         lines += [
             f"### {_safe(candidate.spectroscopy_method)}",
@@ -62,12 +88,30 @@ def render_markdown(report: AssessmentReport) -> str:
         ):
             lines += ["", f"**{heading}**", ""] + _bullets(values)
         lines += ["", "**Supporting evidence and provenance**", ""]
+        for evidence_id in candidate.supporting_evidence_ids:
+            item = evidence_by_id.get(evidence_id)
+            if item:
+                page = f" {item.page_or_section}" if item.page_or_section else ""
+                lines.append(
+                    f"- {item.source_id}{page} · `{html.escape(item.evidence_id, quote=False)}` · "
+                    f"scope: {_safe(item.source_scope)} · review: {_safe(item.review_status)}"
+                )
+                lines.append(f"  > {_safe(item.excerpt)}")
         for evidence in candidate.supporting_evidence:
             entry = f"- [{evidence.kind}] {_safe(evidence.statement)}"
             if evidence.source_url:
                 entry += f" [{_safe(evidence.source_title)}]({evidence.source_url})"
                 entry += f" (source checked {evidence.checked_on}; applicability unverified)."
             lines.append(entry)
+    if report.retrieved_evidence:
+        lines += ["", "## Retrieved source excerpts", ""]
+        for item in report.retrieved_evidence:
+            page = f" {item.page_or_section}" if item.page_or_section else ""
+            lines += [
+                f"- {item.source_id}{page} · `{html.escape(item.evidence_id, quote=False)}` · "
+                f"scope: {_safe(item.source_scope)} · review: {_safe(item.review_status)}",
+                f"  > {_safe(item.excerpt)}",
+            ]
     plan = report.proposed_feasibility_experiment
     lines += ["", "## Proposed feasibility experiment", ""]
     for field in (
@@ -76,6 +120,7 @@ def render_markdown(report: AssessmentReport) -> str:
         "proposed_measurement_technique",
         "sample_preparation",
         "reference_measurement",
+        "proposed_configuration",
     ):
         label = field.replace("_", " ").title()
         value = _safe(getattr(plan, field) or "Undetermined")
@@ -88,6 +133,8 @@ def render_markdown(report: AssessmentReport) -> str:
         "evaluation_metrics",
         "expected_limitations",
         "success_criteria",
+        "success_actions",
+        "failure_actions",
     ):
         lines += (
             [f"### {field.replace('_', ' ').title()}", ""] + _bullets(getattr(plan, field)) + [""]
