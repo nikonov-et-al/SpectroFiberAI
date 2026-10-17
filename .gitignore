@@ -13,6 +13,8 @@ dist/
 !.env.example
 .streamlit/secrets.toml
 reports/
+knowledge/data/materials/*
+!knowledge/data/materials/.gitkeep
 *.log
 .coverage
 htmlcov/
