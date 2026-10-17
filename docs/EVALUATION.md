@@ -1,4 +1,4 @@
-# Future recommendation evaluation
+# Recommendation evaluation
 
 Domain-expert review rubric, not validated scientific scoring or confidence estimates.
 Score each dimension 0–2; retain reviewer notes and source provenance.
@@ -22,6 +22,11 @@ require correction regardless of total.** A high score is not industrial validat
 2. Generate report; have a spectroscopy expert score dimensions with notes.
 3. Review gaps, incorrect candidate inclusion/exclusion, and experiment usefulness.
 4. Add agreed regressions without treating synthetic expectations as scientific truth.
+
+Six synthetic reviews, reproducible outputs, partial software scores and outstanding
+expert questions are in [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md). Generate JSON
+and Markdown with `uv run python scripts/evaluate.py`; fixtures are separate from the
+four original examples. Do not assign scientific plausibility scores without an expert.
 
 Current cases test software behavior. Future evaluation needs real challenge examples,
 expert labels, representative edge cases, and failures. Compare providers separately.

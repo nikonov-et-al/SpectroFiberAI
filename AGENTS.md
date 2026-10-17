@@ -33,17 +33,50 @@ Standing rules for AI coding agents in this repository. Keep milestones and deta
 - Preserve public contracts and persisted data compatibility unless the task explicitly requires a change. Escalate destructive actions, user-data changes, and migration decisions to the orchestrator; obtain user approval where required.
 - Make reasonable, reversible assumptions for minor ambiguity and report them. Do not guess about irreversible or compatibility-sensitive changes.
 
+
 ## 2. Roles and delegation
 
-**Sol — orchestrator** owns task scope, architecture, planning, delegation, final diff review, acceptance, and plan/history updates. Handle tightly coupled or high-risk changes directly. Do not delegate final architectural, migration, data-safety, compatibility, or acceptance decisions.
+all agents and subagetsn use caveman and ponytail skills
 
-**Luna — implementation agent** handles bounded fixes, isolated features, tests, mechanical refactors, documentation, and focused read-only investigations. Inspect relevant code first, stay within scope, preserve behavior unless instructed otherwise, run targeted checks, and report blockers or risks. Never commit unless explicitly authorized.
+**Sol — orchestrator**
+- Owns requirements, architecture, task sequencing,
+  delegation, final review, acceptance, PLAN.md and HISTORY.md.
+- Prefer delegating source-code implementation to Luna.
+- Do not edit application source code directly during
+  autonomous plan execution.
+- Keep architectural, scientific validity, compatibility,
+  migration, and data-safety decisions with Sol.
+- Review worker results before accepting a task.
+- Run integration checks when appropriate.
 
-- Set model versions and reasoning effort in `.codex/config.toml` and `.codex/agents/*.toml`, not in this file.
-- Use the project's Caveman and Ponytail skills when available: Sol uses `ultra` for both; Luna uses Caveman `wenyan-full` or `wenyan-ultra` and Ponytail `ultra`. Report unavailable skills; do not claim to have used them.
-- Delegate only when independent work benefits from separate context or parallelism. Use at most two Luna agents concurrently, with no nested delegation or overlapping edits. Keep small or sequential tasks with Sol.
-- Each delegation must state the objective, allowed and excluded files, expected behavior, and acceptance checks. Sol reviews the returned diff and verification before accepting it.
-- Subagents inherit parent permissions; agent instructions are not a security boundary. Keep runtime limits in `.codex/config.toml` (including `agents.max_concurrent_threads_per_session` where supported).
+**Luna — implementation agent**
+- Handles bounded features, bug fixes, tests, refactoring,
+  documentation, and focused investigations.
+- Implement both independent and sequential tasks.
+- Inspect relevant code before editing.
+- Preserve public contracts and existing behavior.
+- Run relevant checks and report exact results.
+- Never commit unless explicitly authorized.
+
+**Delegation rules**
+- Prefer Luna for implementation, including small tasks
+  when operating in autonomous plan-execution mode.
+- Use at most two concurrent Luna agents.
+- Parallelize only independent tasks with non-overlapping
+  file ownership.
+- Sequential dependencies must be executed in order.
+- No nested delegation.
+- Each delegation must specify scope, allowed files,
+  expected behavior, exclusions, and acceptance checks.
+- Sol reviews changes before accepting them.
+- Subagents inherit parent permissions; instructions
+  are not a security boundary.
+
+**Configuration**
+- Set model versions and reasoning effort in
+  .codex/config.toml and .codex/agents/*.toml.
+- Keep runtime limits in Codex configuration.
+
 
 ## 3. Planning and delivery
 
@@ -51,6 +84,64 @@ Standing rules for AI coding agents in this repository. Keep milestones and deta
 - After accepting a planned step, add a `Completed` entry in `HISTORY.md` containing its **exact original text**, completion date, implementation summary, verification, and deviations. Only then remove that step from `PLAN.md`; keep `PLAN.md` for pending work.
 - Keep changes small and focused. Follow existing layer boundaries and use project tooling or structured parsers when appropriate.
 - Run relevant tests or checks, fix regressions caused by the change, and state precisely what passed, failed, or could not run. Never imply unrun checks passed.
+
+
+### Autonomous PLAN.md execution
+
+When explicitly asked to execute PLAN.md end-to-end:
+
+1. Read the complete PLAN.md and relevant project context.
+2. Determine dependencies and a safe execution order.
+3. Work through all feasible pending tasks, not just one.
+4. Select the smallest independently verifiable task.
+5. Delegate implementation to Luna where available.
+6. Validate the result against acceptance criteria.
+7. Fix regressions before accepting the task.
+8. Once accepted by Sol:
+   - Append a Completed entry to HISTORY.md.
+   - Preserve the exact original task text.
+   - Record the date, implementation and verification.
+   - Remove the completed task from PLAN.md.
+9. Continue automatically with the next pending task.
+10. Do not ask for approval between routine tasks.
+
+
+- PLAN.md is the executable implementation backlog.
+- docs/HACKATHON_PLAN.md tracks hackathon strategy,
+  scope, milestones, and confirmed challenge facts.
+- Keep both consistent without duplicating task history.
+
+
+### Failure handling
+
+- Investigate failed tests and attempt focused repairs.
+- After two unsuccessful repair attempts, record the
+  blocker and preserve the original pending task.
+- Continue with other safe, independent tasks.
+- Never mark unverified tasks as completed.
+- Never fabricate scientific requirements, limits,
+  measurements, citations, or customer specifications.
+- Stop when a decision requires user approval,
+  no safe executable tasks remain, or execution
+  is interrupted by permissions or runtime limits.
+
+### Verification
+
+- Run targeted checks after implementation.
+- Before accepting a milestone, run:
+  - uv run pytest
+  - uv run ruff check .
+  - uv run ruff format --check .
+- Report failures and unavailable checks accurately.
+
+### Completion condition
+
+Continue until PLAN.md has no feasible pending tasks,
+or all remaining tasks have documented blockers.
+
+Report completed work, blocked tasks, tests, and
+remaining risks.
+
 
 ## 4. Commits
 

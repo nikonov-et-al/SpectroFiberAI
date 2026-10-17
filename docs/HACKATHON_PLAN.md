@@ -4,16 +4,46 @@
 
 - Python 3.14 with uv-managed locked dependencies.
 - Typed requirements, candidates, evidence, feasibility plans, reports.
-- Literal extraction, missing-field questions, qualitative rules, explicit abstention.
+- Literal offline extraction, missing-field questions, qualitative rules, explicit abstention.
+- Optional local Ollama schema-constrained extraction with quote checks and visible offline fallback.
+- Experimental optional local Ollama assessment using the allowlisted AFS index. Reports bind citations to retrieved excerpts and preserve source/page/review metadata; unsupported, insufficient, and offline-fallback outcomes are labeled separately. Phase 3 live acceptance is pending: D01/D02 still show semantic transfer errors after two focused repairs. Keep the offline baseline as the default; this path is not validated for demo claims.
 - Five preliminary technique profiles with provenance and expert-review flags.
 - Streamlit demo, four synthetic scenarios, structured JSON, Markdown download.
-- Optional SDK and prompt/provider seams; OpenAI adapter unimplemented.
+- Independent local document RAG with Ollama embeddings and Ollama/API generation; OpenAI assessment remains unimplemented.
+- Separate allowlisted AFS evidence index with local BM25 retrieval; source/page hashes and review flags are preserved and consumed by the optional grounded assessment.
 - Tests, Ruff, GitHub Actions checks.
+- Structured expert answers/corrections, field provenance, consequential questions,
+  contextual candidate conditions, conditional geometry, tailored study outcome branches.
+- Six separate synthetic evaluations; see [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md).
+  Ready-to-use workflow and recovery: [DEMO_PLAN.md](DEMO_PLAN.md).
 
-## Unknowns
+The supplied challenge brief names ArtFiberSystems' **AI Assistant for In-line
+Spectroscopy Solution Design** and lists the evaluation weights. AFS source files and
+D01–D08/H01–H06 fixtures are present locally. Independent organizer confirmation,
+actual hardware specifications, measured customer data, and achievable performance
+remain unconfirmed. Source coverage and review status: [AFS_SOURCE_REVIEW.md](AFS_SOURCE_REVIEW.md)
+and unresolved questions: [CHALLENGE.md](CHALLENGE.md).
 
-Problem, users, judging criteria, real data, references, hardware, AFS sources,
-permitted services, networking, and demo constraints. See CHALLENGE.md.
+Software checks: 127 tests passed, Ruff lint/format passed, and startup returned
+HTTP 200/ok. Live D01/D02 Ollama assessment outputs are exploratory and failed Phase 3
+semantic review after two focused repairs; see the limitations above. Automated
+workflow rehearsal passes; human event rehearsal and scientific review remain pending.
+
+## Open questions
+
+Independent organizer confirmation, representative measured customer data,
+instrument/hardware specifications, permitted external services, and live-demo
+constraints. The supplied brief defines the rubric, and source files plus scenario
+fixtures are present locally. See CHALLENGE.md. Development target: user-reported RTX
+4070 with 12 GB VRAM; synthetic Ollama rehearsal passed; single-run measurements are
+in HISTORY.md.
+
+The first AFS evidence index run found 7 allowlisted files and 160 unique excerpts;
+all eight saved D-case queries returned eight lexical hits and surfaced each case's
+main application page in the top eight. This is retrieval coverage only. False
+positives remain, D06 fiber-range guidance was not retrieved in the top eight, and no
+retrieved excerpt is a scientific suitability judgment. Page coverage: [AFS source
+review](AFS_SOURCE_REVIEW.md).
 
 ## Prioritized milestones
 
@@ -32,8 +62,8 @@ tuning AI against unverified labels.
 
 ## Optional stretch features
 
-Validated LLM extraction; authorized document retrieval; instrument constraints;
-challenge dataset exploration; German translation; hardware only if required/available.
+Expert validation of retrieved document content; instrument constraints; challenge
+dataset exploration; German translation; hardware only if required/available.
 Choose against the actual rubric.
 
 ## Demo checklist
@@ -53,15 +83,28 @@ Choose against the actual rubric.
 
 | Risk | Mitigation |
 | --- | --- |
-| Literal parser misses language/negation | Show raw input/gaps; use labels and reviewed regressions. |
+| Extraction misses language or semantic details | Show exact quotes, raw input, and gaps; review model extraction; keep offline fallback. |
 | Rules mistaken for scientific validation | Provisional status, evidence labels, abstention, expert review. |
 | Sources do not describe actual instruments | Obtain AFS documents; validate compatibility separately. |
 | No reference labels/samples | Keep thresholds unknown; prioritize reference acquisition. |
 | No internet/API | Install early; maintain offline baseline. |
 | Future SDK incompatible with Python 3.14 | Assess when known; record agreed runtime change. |
-| Infrastructure consumes hackathon | Keep one process; defer ingestion/deployment/frameworks. |
+| Infrastructure consumes hackathon | Keep one process and local SQLite index; defer deployment/frameworks. |
 
 ## First three tasks when announced
 
 Confirm acceptance criteria/assets; validate knowledge/rules with experts; implement
 one challenge-specific workflow with regression coverage.
+
+## Document RAG rehearsal
+
+- [x] Install `rag` extra, local Ollama, and configured generation/embedding models.
+- [ ] Index only authorized documents; inspect page/line provenance and search results.
+- [x] Rehearse supported/unsupported questions with real Ollama; test unavailable models and rebuild offline.
+- [ ] Confirm question/excerpt transfer is acceptable before choosing API generation.
+- [x] Measure GPU residency, post-run total VRAM, indexing time, and answer latency on the RTX 4070 (single synthetic run; no peak-memory claim).
+- [ ] Review cited statements against source passages; similarity is not confidence.
+- [ ] Preserve the original offline synthetic assessment fallback.
+
+No challenge dataset, instrument specification, or scientific suitability has been
+validated by adding retrieval. Scanned PDFs and complex tables need another workflow.
