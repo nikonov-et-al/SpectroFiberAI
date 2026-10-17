@@ -1,0 +1,8 @@
+[
+  {"id":"fermentation","text":"We want to monitor ethanol in aqueous fermentation broth.\nState: liquid; Deployment mode: in-line","status":"provisional_candidates","methods":["Raman","MIR/FTIR"],"unknowns":["concentration_range","required_accuracy"]},
+  {"id":"powder","text":"We measure moisture in food powder.\nState: powder","status":"provisional_candidates","methods":["NIR"],"unknowns":["required_accuracy","composition"]},
+  {"id":"reactor","text":"We monitor reaction progress in reaction mixture.\nState: liquid; Process: batch reactor","status":"provisional_candidates","methods":["Raman","MIR/FTIR"],"unknowns":["temperature","pressure"]},
+  {"id":"contamination","text":"Objective: detect contamination; Target: unknown; Matrix: process liquid; Detection limit: 1 ppm","status":"insufficient_information","methods":[],"unknowns":["target_analyte_or_property"]},
+  {"id":"fluorescence_background","text":"Objective: identify polymer; Target: polymer identity; Matrix: polymer pellets; State: pellets; Interference: strong fluorescence","status":"provisional_candidates","methods":["Raman","MIR/FTIR"],"unknowns":["required_accuracy"]},
+  {"id":"insufficient","text":"We need an industrial sensor.","status":"insufficient_information","methods":[],"unknowns":["measurement_objective","target_analyte_or_property","sample_matrix"]}
+]
