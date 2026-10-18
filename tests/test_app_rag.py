@@ -6,6 +6,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from spectro_ai import rag
+from spectro_ai.models import AssessmentReport, CustomerUseCase, FeasibilityPlan
 from spectro_ai.rag_models import CitedStatement, DocumentAnswer, RagResult
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
@@ -51,6 +52,15 @@ def test_document_error_visible_without_assessment_change(monkeypatch: pytest.Mo
         raise ValueError("Synthetic model unavailable")
 
     monkeypatch.setattr(rag, "ask", fail)
+    monkeypatch.setattr(
+        "spectro_ai.providers.assess_problem",
+        lambda text: AssessmentReport(
+            extracted_requirements=CustomerUseCase(source_text=text),
+            proposed_feasibility_experiment=FeasibilityPlan(),
+            status="insufficient_information",
+            assessment_method="evidence_abstention",
+        ),
+    )
     app = AppTest.from_file(str(APP)).run()
     app.text_input(key="rag_question").input("Synthetic question").run()
     app.button(key="rag_ask").click().run()
@@ -58,4 +68,5 @@ def test_document_error_visible_without_assessment_change(monkeypatch: pytest.Mo
     assert any("Synthetic model unavailable" in e.value for e in app.error)
     app.text_area[0].input("We measure moisture in flour.").run()
     app.button[0].click().run()
-    assert app.session_state["report"].candidate_techniques
+    assert app.session_state["report"].assessment_method == "evidence_abstention"
+    assert not app.session_state["report"].candidate_techniques
