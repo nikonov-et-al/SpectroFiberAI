@@ -104,16 +104,23 @@ def test_validation_binds_ids_and_metadata_to_host_snapshot():
     assert result.model_identity == "local-model"
 
 
-def test_source_described_reflection_geometry_is_kept_and_invented_geometry_is_rejected():
+def test_method_and_geometry_labels_can_be_semantic_and_missing_values_stay_unknown():
     source_text = "NIR diffuse reflection measured protein concentration in solution."
     source = _source().model_copy(update={"excerpt": source_text})
     observation = _observation(
         source_statement=source_text,
         references=[EvidenceReference(evidence_id="src-1", quote=source_text)],
-        method="NIR",
-        geometry="diffuse reflection",
+        method="near infrared spectroscopy",
+        geometry="diffuse reflectance",
     )
-    assessment = _assessment(observations=[observation], support_assessments=[])
+    support = ApplicationSupportAssessment(
+        support_assessment_id="model-support",
+        method="near infrared spectroscopy",
+        basis="application_supported",
+        observation_ids=["model-observation"],
+        bounded_conclusion="Source reports a near infrared measurement.",
+    )
+    assessment = _assessment(observations=[observation], support_assessments=[support])
     customer = CustomerUseCase(
         measurement_objective="protein concentration", sample_matrix="powder"
     )
@@ -127,7 +134,7 @@ def test_source_described_reflection_geometry_is_kept_and_invented_geometry_is_r
     )
     missing = validate_assessment(
         _assessment(
-            observations=[observation.model_copy(update={"geometry": None})],
+            observations=[observation.model_copy(update={"method": None, "geometry": None})],
             support_assessments=[],
         ),
         customer,
@@ -135,9 +142,15 @@ def test_source_described_reflection_geometry_is_kept_and_invented_geometry_is_r
         "host-fingerprint",
         "ea-v1",
     )
-    invented = validate_assessment(
+    fabricated_quote = validate_assessment(
         _assessment(
-            observations=[observation.model_copy(update={"geometry": "transmission"})],
+            observations=[
+                observation.model_copy(
+                    update={
+                        "references": [EvidenceReference(evidence_id="src-1", quote="fiber probe")]
+                    }
+                )
+            ],
             support_assessments=[],
         ),
         customer,
@@ -146,9 +159,13 @@ def test_source_described_reflection_geometry_is_kept_and_invented_geometry_is_r
         "ea-v1",
     )
 
-    assert valid.observations[0].geometry == "diffuse reflection"
+    assert valid.observations[0].method == "near infrared spectroscopy"
+    assert valid.observations[0].geometry == "diffuse reflectance"
+    assert len(valid.support_assessments) == 1
     assert missing.observations[0].geometry is None
-    assert invented.observations == []
+    assert missing.observations[0].method is None
+    assert fabricated_quote.observations == []
+    assert any("source reference" in warning for warning in fabricated_quote.diagnostics.warnings)
 
 
 def test_unknown_customer_condition_cannot_be_marked_match():

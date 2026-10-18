@@ -4,6 +4,12 @@ Step 1 adds a structured evidence pass, not a technique ranking system. Scientif
 judgments remain model-assessed. Source authenticity, quotation membership, source
 review, application relationship and customer suitability are separate questions.
 
+Method and geometry labels need not occur verbatim in the supporting quotations.
+Their semantic attribution remains model-assessed and requires expert review;
+the host does not verify it through substring matching. Exact quotation membership,
+source provenance, condition comparisons and internal support/observation method
+identity checks remain enforced.
+
 ## Scientific review protocol
 
 Before comparing outputs, pin the source files, index revision, excerpt/block IDs,

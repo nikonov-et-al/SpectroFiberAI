@@ -46,7 +46,8 @@ def validate_assessment(
     """Validate model references and assign host-owned IDs and metadata.
 
     Invalid observations/support records are dropped with diagnostics. This checks
-    structure and quote membership only; it does not verify scientific entailment.
+    structure and quote membership only; method and geometry attribution stays
+    model-assessed because this validator does not verify semantic entailment.
     """
     warnings = list(assessment.diagnostics.warnings)
     observations: list[EvidenceObservation] = []
@@ -73,13 +74,6 @@ def validate_assessment(
         }
         if len(source_keys) != 1:
             warnings.append(f"Dropped observation {index}: references cross source scenarios")
-            continue
-        source_quotes = " ".join(reference.quote for reference in observation.references).casefold()
-        if observation.method and observation.method.casefold() not in source_quotes:
-            warnings.append(f"Dropped observation {index}: method is absent from its quotations")
-            continue
-        if observation.geometry and observation.geometry.casefold() not in source_quotes:
-            warnings.append(f"Dropped observation {index}: geometry is absent from its quotations")
             continue
         if not all(
             _valid_comparison(comparison, customer, evidence_by_id, observation.references)

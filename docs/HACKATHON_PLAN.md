@@ -1,5 +1,13 @@
 # Hackathon plan
 
+## Evidence label validation repair — 2026-10-18
+
+User requested removal of literal method/geometry matching within observation
+quotations. Semantic attribution remains model-assessed; exact quotation provenance
+and existing support/application guards remain enforced. This avoids lexical
+rejection of paraphrased labels but does not establish scientific validity or
+close existing expert-review gates.
+
 ## Step 1 reliability repair — 2026-10-18
 
 User-approved repair addresses premature evidence loss from mixed byte/token
