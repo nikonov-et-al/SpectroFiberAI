@@ -41,6 +41,15 @@ safe Markdown/context/other-format work. No further tuning under this request.
 
 **Acceptance:** reproducible test results and reviewed AFS examples exist. Software success alone does not close scientific acceptance gates.
 
+**Usefulness gate blocker — 2026-10-18:** software regressions and the reproducible
+three-case real AFS BM25 comparison are implemented. Comparison runs stay within
+retrieval budgets, but do not recover the expected operating-condition and probe
+limitation statements. Default provider request fitting retains no attached
+context in these cases. Human relevance labels and expert review remain absent;
+no quality/default-promotion claim is accepted. Preserve this milestone and keep
+parent expansion false. See docs/STRUCTURE_CONTEXT_REVIEW.md for exact snapshot,
+measurements and limitations. Query/model-budget changes are outside this task.
+
 Each milestone requires targeted tests, full pytest, Ruff lint/format, demo smoke,
 Sol review and a Conventional Commit. Preserve unrelated work. Copy each accepted
 milestone's exact original text into HISTORY.md before removing it here.

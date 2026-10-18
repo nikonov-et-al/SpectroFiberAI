@@ -758,3 +758,28 @@ Final compatibility audit also corrected a pre-existing evidence-ID weakness: no
 Acceptance: 200 tests passed; Ruff lint passed; Ruff format check passed (63 files); Streamlit HTTP 200/ok. This includes the final synthetic PDF repeated-value/operating-condition provenance test.
 
 Deviation: cached raw XLSX values are preserved; formulas are not evaluated and display number formats are not rendered. No inferred units or header meanings. Parser/default and real AFS usefulness gates remain pending independently.
+
+
+## Implemented — 2026-10-18 — Structure-aware milestone 4 (usefulness blocked)
+
+### Original milestone text
+
+### 4. Scientific-context regression and AFS usefulness gate
+
+- Add offline end-to-end tests through ingestion → retrieval → prompt construction → mocked assessment → validation → exports.
+- Cover table headers and values, customer/source units, device identity, operating conditions, calibration limits, nearby qualifications and contradictory/limiting passages.
+- Include adversarial cases: value separated from unit; limitation immediately after claim; similar values on different pages; ambiguous headings; multi-page tables; tampered block references; repeated parent context falsely presented as corroboration.
+- Assert exact document version and page/line/block provenance, no title-only quotation support, unchanged source-review status, and correct abstention/unsupported-claim behavior.
+- Run expansion-off/on comparisons against pinned real AFS indexes. Review at least one table/specification question, one operating-condition question and one limitation question; record expected source passages before comparing outputs.
+- Require useful surrounding context on reviewed cases, no observed citation/context regressions, and recorded latency/context-volume results. Retrieval metrics require human-reviewed, index-bound labels.
+- Keep default disabled unless regression checks pass **and** real-document review demonstrates usefulness. Enabling default requires a separately recorded acceptance decision.
+
+**Acceptance:** reproducible test results and reviewed AFS examples exist. Software success alone does not close scientific acceptance gates.
+
+### Implementation and verification
+
+Implemented offline scientific-context regressions through real synthetic ingestion, retrieval, prompt construction, mocked assessment, validation and exports. Coverage includes table units/conditions/limitations, repeated values on different PDF pages, exact block/page/version citations, title-only rejection, canonical tampering, source-block windows, same-source conflict safeguards, and claim-refit citation preservation. Existing multi-page table ambiguity tests reject unsupported exact row-page assignments.
+
+Final software acceptance: 200 tests passed, Ruff lint/format passed (63 files), Streamlit HTTP 200/ok and uv lock --check passed. Reproducible real AFS comparison used pinned schema 3 revision 9298e600933d4b35bdc1de85fde91245, seven files and 196 chunks, BM25 off/on with three warm repetitions. All retrieval totals remained below 12,000 bytes. Canonical provider verification passed; default complete-request fitting retained three children and no context in each case. No live generation or embedding requests.
+
+Usefulness not accepted: expected operating-condition and limitation statements were not recovered, and default provider budgets remove attached context. Precision/recall remain null without human relevance labels; expert review remains open. Original milestone stays pending in PLAN.md; expansion remains disabled. See docs/STRUCTURE_CONTEXT_REVIEW.md for measurements and source/PDF gate findings.

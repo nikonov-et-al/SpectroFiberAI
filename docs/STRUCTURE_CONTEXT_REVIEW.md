@@ -60,3 +60,45 @@ Model assets: Heron `model.safetensors` SHA256
 TableFormer accurate SHA256
 `2A7D6C924B3CD12FB99A09280CA9C33A89C5D60B93253617D2E088C1A40374D9`.
 Actual application fingerprints must include configured artifacts and options.
+
+### Final pinned BM25 comparison — usefulness not accepted
+
+Run after final format/identity changes, with 7 real AFS source files and 196
+deduplicated chunks. Active demo database was not replaced. Snapshot revision:
+`9298e600933d4b35bdc1de85fde91245`; extraction fingerprint:
+`e648d473f7b014de9ff2408c388b217aa315a193ea81659afc66f43fa3db7992`.
+Source hashes and exact child/block identities are in the ignored JSON artifact
+`.cache/structure-context/pypdf-review.json`.
+
+Each mode used one pinned snapshot, BM25 without reranking, a warmup and three
+timed repetitions. All modes returned 8 children. Times below are local warm
+medians, not a service-level or scientific performance claim.
+
+| Case | Off / on latency (ms) | Attached blocks | Serialized context bytes | Child + context bytes (on) |
+| --- | --- | --- | --- | --- |
+| Table/specification | 8.74 / 9.84 | 2 | 2,687 | 11,188 |
+| Operating conditions | 8.61 / 10.63 | 2 | 3,460 | 11,913 |
+| Limitations | 8.93 / 10.24 | 2 | 3,316 | 11,955 |
+
+All totals stay within the 12,000-byte retrieval budget. Table search adds S01
+p.6's caption block, but this does not repair or validate row/value relationships.
+Operating-condition retrieval includes S01 p.10's first chunk, while the expected
+overlapping-band/chemometrics qualification is in the following chunk and is not
+recovered. Limitation retrieval reaches S04 p.4's final chunk after expansion
+budget allocation, but not the expected fluorescent-component/ATR/tight-contact
+qualification. Merely retrieving the expected page is not successful retrieval
+of its relevant statement.
+
+Canonical provider verification accepted all attached blocks with their source
+locations and review metadata. It excluded the secondary-transcription child in
+the table case (7 technical children retained there, 8 in the other cases). With
+the existing default 16,384 context budget and 4,096 output reservation, complete
+request fitting retained 3 children and **0 context blocks** in every case. This
+is the required context-first dropping policy, not evidence of useful expansion.
+Details are in ignored `.cache/structure-context/provider-fit-review.json`.
+
+No generation request or semantic model request was made. Precision/recall remain
+null because no human-reviewed relevance labels exist. The software regression
+suite passes, but actual scientific-context usefulness and expert acceptance
+remain open; parent expansion stays disabled. Improving query selection or
+changing model/context budgets requires a separately reviewed task.

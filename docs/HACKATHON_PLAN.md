@@ -23,6 +23,10 @@ DOCX/XLSX/TXT also use source-block packing with explicit headers and original
 paragraph/row/line positions. The offline scientific-context tests cover repeated
 values under different operating conditions, exact citations, same-source
 limitations, tampering and provider budgets. Real AFS usefulness remains unaccepted.
+Final three-case pinned BM25 comparison stays within retrieval budgets but misses
+the expected qualification passages; default provider fitting drops all attached
+context. Keep expansion disabled. Detailed measurements and both promotion-gate
+blockers are in [STRUCTURE_CONTEXT_REVIEW.md](STRUCTURE_CONTEXT_REVIEW.md).
 
 - Python 3.14 with uv-managed locked dependencies.
 - Typed requirements, candidates, evidence, feasibility plans, reports.
