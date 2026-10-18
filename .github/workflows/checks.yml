@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-latest
     env:
       UV_PYTHON_DOWNLOADS: never
-      SPECTRO_AI_PROVIDER: baseline
+      SPECTRO_AI_PROVIDER: ollama
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

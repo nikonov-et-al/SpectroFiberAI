@@ -2,6 +2,7 @@
 
 | Date | Decision | Reason / revisit trigger |
 | --- | --- | --- |
+| 2026-10-18 | Replace offline parser/recommender/fallback with sole evidence-grounded Ollama/OpenAI pipeline | User-approved architecture supersedes earlier baseline decisions. Keep deterministic guardrails and network-free tests; provider failures are errors, scientific gaps abstain. Expert scientific gate remains open. |
 | 2026-10-17 | Keep grounded assessment as an opt-in Ollama adapter over the validated customer case and allowlisted evidence index; report abstention and fallback distinctly | Preserve offline baseline and customer corrections, while citations remain tied to retrieved source excerpts; lexical screening is only a necessary check, not semantic validation. |
 | 2026-10-17 | Add separate allowlisted AFS evidence index with deterministic local BM25 | Preserve citations and review status without turning retrieved text into technique rules; revisit after expert review and measured retrieval gaps. |
 | 2026-10-17 | Add schema-constrained local Ollama extraction with literal quote checks and visible offline fallback | Keep default credential-free mode; a quote check limits unsupported facts but does not establish semantic correctness. |
