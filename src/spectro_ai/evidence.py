@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
 import posixpath
 import re
 import sqlite3
+import threading
 import time
 import uuid
 import zipfile
 from collections import Counter
 from contextlib import closing
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -26,9 +29,19 @@ from spectro_ai.models import (
     CustomerUseCase,
     RetrievedEvidence,
     SourceBlock,
+    SourceBlockSpan,
     SourceLocation,
     SourceSection,
     TechniqueKnowledge,
+)
+from spectro_ai.structure import (
+    BlockSpan,
+    PackedPassage,
+    SectionSpec,
+    SourceUnit,
+    StructuredSource,
+    markdown_source,
+    pack_source,
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +51,7 @@ _DOCUMENTS = _ROOT / "documents"
 _CHUNKING_VERSION = 3
 _INDEX_SCHEMA_VERSION = 3
 _SUPPORTED_CHUNKING_VERSIONS = {3}
+_DOCLING_ENV_LOCK = threading.Lock()
 _CHUNK_SIZE = 1200
 _CHUNK_OVERLAP = 180
 _BANNED_FILES = {
@@ -103,15 +117,83 @@ def _embedding_config(settings: Any, identity: str, dimension: int | None = None
     }
 
 
-def _extraction_fingerprint(chunk_size: int, chunk_overlap: int) -> str:
+def _pdf_backend() -> str:
+    backend = os.getenv("SPECTRO_PDF_BACKEND", "pypdf").casefold()
+    if backend not in {"pypdf", "docling"}:
+        raise ValueError("SPECTRO_PDF_BACKEND must be 'pypdf' or 'docling'")
+    return backend
+
+
+@lru_cache(maxsize=32)
+def _file_digest(path: str, size: int, modified_ns: int) -> str:
+    del size, modified_ns  # Cache key invalidates the digest when the file changes.
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _docling_models_fingerprint(models_path: Path) -> str:
+    assets = sorted(
+        path
+        for path in models_path.rglob("*")
+        if path.is_file() and path.suffix.casefold() in {".safetensors", ".json", ".yaml"}
+    )
+    if not assets:
+        return "missing-local-assets"
+    return _sha256(
+        json.dumps(
+            [
+                (
+                    path.relative_to(models_path).as_posix(),
+                    _file_digest(
+                        str(path.resolve()),
+                        path.stat().st_size,
+                        path.stat().st_mtime_ns,
+                    ),
+                )
+                for path in assets
+            ],
+            sort_keys=True,
+        ).encode()
+    )
+
+
+def _extraction_fingerprint(chunk_size: int, chunk_overlap: int, pdf_backend: str) -> str:
+    package = "docling" if pdf_backend == "docling" else "pypdf"
+    try:
+        parser_version = importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        parser_version = "not-installed"
     settings = {
         "extractors": {
-            "pdf": "pypdf-v1",
-            "markdown": "markdown-v1",
+            "pdf": {"backend": pdf_backend, "version": parser_version},
+            "markdown": "markdown-structure-v1",
             "txt": "txt-v1",
             "docx": "docx-v1",
             "xlsx": "xlsx-v1",
         },
+        "docling": (
+            {
+                "device": "cpu",
+                "table_structure": True,
+                "ocr": False,
+                "remote_services": False,
+                "heading_hierarchy": {
+                    "enabled": True,
+                    "use_bookmarks": True,
+                    "use_numbering": True,
+                    "use_style": True,
+                    "use_font_style": True,
+                },
+            }
+            if pdf_backend == "docling"
+            else None
+        ),
+        "pdf_backend": pdf_backend,
+        "docling_models": (
+            _docling_models_fingerprint(_ROOT / ".cache" / "docling" / "models")
+            if pdf_backend == "docling"
+            else None
+        ),
         "chunking_version": _CHUNKING_VERSION,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
@@ -256,6 +338,343 @@ def _pdf_blocks(path: Path) -> tuple[list[tuple[str, str]], list[str], list[str]
             f"Scanned or empty PDF cannot be indexed: {path.name}; OCR is not supported"
         )
     return blocks, empty_pages, poor_pages
+
+
+def _legacy_structured(blocks: list[tuple[str, str]]) -> StructuredSource:
+    source = StructuredSource()
+    for locator, text in blocks:
+        section_match = re.search(r"section=([^;]+)", locator)
+        page_match = re.match(r"p\.(\d+)", locator)
+        lines_match = re.search(r"lines (\d+)-(\d+)", locator)
+        key = (
+            section_match.group(1)
+            if section_match
+            else (f"page:{page_match.group(1)}" if page_match else locator)
+        )
+        heading_path = (section_match.group(1).strip(),) if section_match else ()
+        source.sections.setdefault(key, SectionSpec(key, heading_path))
+        source.units.append(
+            SourceUnit(
+                text=text,
+                locator=locator,
+                section_key=key,
+                heading_path=heading_path,
+                block_type="paragraph",
+                page_number=int(page_match.group(1)) if page_match else None,
+                line_start=int(lines_match.group(1)) if lines_match else None,
+                line_end=int(lines_match.group(2)) if lines_match else None,
+            )
+        )
+    return source
+
+
+def _docling_pdf_document(path: Path, models_path: Path) -> Any:
+    """Convert PDF with explicit local CPU pipeline; never permit remote model fetches."""
+    required = (
+        models_path / "docling-project--docling-layout-heron" / "model.safetensors",
+        models_path
+        / "docling-project--docling-models"
+        / "model_artifacts"
+        / "tableformer"
+        / "accurate"
+        / "tableformer_accurate.safetensors",
+    )
+    missing = [str(asset) for asset in required if not asset.is_file()]
+    if missing:
+        raise RuntimeError(
+            "Docling local models are missing; run `.tools/Scripts/uv.exe run --extra rag "
+            f"python scripts/setup_docling.py`. Missing: {', '.join(missing)}"
+        )
+    try:
+        from docling.datamodel.accelerator_options import AcceleratorOptions
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import HeadingHierarchyOptions, PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+    except ImportError as exc:
+        raise RuntimeError("PDF backend 'docling' requires the project 'rag' extra") from exc
+
+    options = PdfPipelineOptions(
+        accelerator_options=AcceleratorOptions(device="cpu"),
+        artifacts_path=models_path,
+        enable_remote_services=False,
+        allow_external_plugins=False,
+        do_ocr=False,
+        do_table_structure=True,
+        do_picture_classification=False,
+        do_picture_description=False,
+        do_code_enrichment=False,
+        do_formula_enrichment=False,
+        generate_parsed_pages=True,
+        heading_hierarchy_options=HeadingHierarchyOptions(
+            enabled=True,
+            use_bookmarks=True,
+            use_numbering=True,
+            use_style=True,
+            use_font_style=True,
+        ),
+    )
+    local_environment = {
+        "HF_HOME": str(models_path.parent),
+        "HF_HUB_OFFLINE": "1",
+        "DOCLING_ARTIFACTS_PATH": str(models_path),
+    }
+    with _DOCLING_ENV_LOCK:
+        previous_environment = {key: os.environ.get(key) for key in local_environment}
+        os.environ.update(local_environment)
+        try:
+            converter = DocumentConverter(
+                allowed_formats=[InputFormat.PDF],
+                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)},
+            )
+            result = converter.convert(path)
+        finally:
+            for key, value in previous_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+    return _checked_docling_document(result, path)
+
+
+def _checked_docling_document(result: Any, path: Path) -> Any:
+    status = getattr(result.status, "value", str(result.status)).casefold()
+    if status != "success" or result.document is None:
+        raise ValueError(f"Docling PDF conversion failed for {path.name}: {result.status}")
+    if getattr(result, "errors", None):
+        raise ValueError(f"Docling PDF conversion reported errors for {path.name}: {result.errors}")
+    return result.document
+
+
+def _docling_pdf_source(path: Path, models_path: Path) -> StructuredSource:
+    document = _docling_pdf_document(path, models_path)
+    entries: list[tuple[Any, int | None, tuple[int, ...]]] = []
+    page_ids = {int(key) for key in getattr(document, "pages", {}) if str(key).isdigit()}
+    caption_refs: set[str] = set()
+    for item, _ in document.iterate_items(with_groups=False, traverse_pictures=False):
+        for reference in getattr(item, "captions", []):
+            caption_refs.add(reference.cref)
+    for item, _ in document.iterate_items(with_groups=False, traverse_pictures=False):
+        prov = getattr(item, "prov", []) or []
+        item_pages = sorted(
+            {int(value.page_no) for value in prov if getattr(value, "page_no", None)}
+        )
+        label = getattr(getattr(item, "label", None), "value", "")
+        if len(item_pages) > 1 and label in {"table", "document_index"}:
+            raise ValueError(
+                f"Docling table {getattr(item, 'self_ref', '<unknown>')} spans pages "
+                f"{item_pages}; exact row/page provenance is ambiguous"
+            )
+        if item_pages and page_ids and any(page not in page_ids for page in item_pages):
+            raise ValueError(
+                f"Docling item {getattr(item, 'self_ref', '<unknown>')} refers to "
+                f"unknown PDF page(s) {item_pages}"
+            )
+        page = item_pages[0] if item_pages else None
+        entries.append((item, page, tuple(item_pages)))
+
+    headings: list[tuple[int, int | None, str]] = []
+    previous_page = 0
+    diagnostics: list[str] = []
+    for item, page, _page_numbers in entries:
+        if page is not None:
+            if page < previous_page:
+                diagnostics.append("Docling item order moves backwards across PDF pages")
+            previous_page = page
+        if getattr(getattr(item, "label", None), "value", "") == "section_header":
+            level = getattr(item, "level", None)
+            title = str(getattr(item, "text", "")).strip()
+            if not isinstance(level, int):
+                diagnostics.append(f"Invalid detected heading level {level!r}: {title}")
+                headings.append((0, page, title))
+                continue
+            if not 1 <= level <= 6:
+                diagnostics.append(f"Invalid detected heading level {level!r}: {title}")
+            headings.append((level, page, title))
+    if not headings:
+        diagnostics.append("No PDF headings detected; using flat page-local sections")
+    previous_level = 0
+    number_stack: dict[int, tuple[int, ...]] = {}
+    siblings: dict[tuple[int, tuple[int, ...]], int] = {}
+    for level, _page, title in headings:
+        if not 1 <= level <= 6:
+            continue
+        if previous_level and level > previous_level + 1:
+            diagnostics.append(f"Detected heading level jump {previous_level} to {level}: {title}")
+        previous_level = level
+        number = re.match(r"^\s*(\d+(?:\.\d+)*)[.)]?\s+", title)
+        if number:
+            parts = tuple(int(part) for part in number.group(1).split("."))
+            if len(parts) != level:
+                diagnostics.append(
+                    f"Heading numbering depth conflicts with detected level: {title}"
+                )
+            parent_number = number_stack.get(level - 1)
+            if level > 1 and parent_number and parts[:-1] != parent_number:
+                diagnostics.append(f"Heading numbering conflicts with detected parent: {title}")
+            sibling_key = (level, parts[:-1])
+            if sibling_key in siblings and parts[-1] <= siblings[sibling_key]:
+                diagnostics.append(f"Heading numbering is not increasing: {title}")
+            siblings[sibling_key] = parts[-1]
+            number_stack[level] = parts
+            for deeper in [candidate for candidate in number_stack if candidate > level]:
+                number_stack.pop(deeper)
+
+    hierarchy_valid = not diagnostics and bool(headings)
+    source = StructuredSource(diagnostics=diagnostics)
+    pages = sorted({int(key) for key in getattr(document, "pages", {}) if str(key).isdigit()})
+    source_pages: set[int] = set()
+    heading_stack: list[tuple[int, str, str]] = []
+    root_key = "pdf-root"
+    source.sections[root_key] = SectionSpec(root_key, hierarchy_valid=hierarchy_valid)
+    current_key = root_key
+    current_path: tuple[str, ...] = ()
+    item_number = 0
+    for item, page, page_numbers in entries:
+        item_number += 1
+        label = getattr(getattr(item, "label", None), "value", "")
+        if label in {"page_header", "page_footer"}:
+            continue
+        if not hierarchy_valid:
+            page_key = f"pdf-page:{page}" if page is not None else f"pdf-order:{item_number}"
+            source.sections.setdefault(
+                page_key,
+                SectionSpec(
+                    page_key,
+                    hierarchy_valid=False,
+                    diagnostics=list(diagnostics),
+                ),
+            )
+            current_key, current_path = page_key, ()
+        elif label == "section_header":
+            level = int(getattr(item, "level", 1))
+            title = str(getattr(item, "text", "")).strip()
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            parent_key = heading_stack[-1][2] if heading_stack else root_key
+            current_path = tuple(entry[1] for entry in heading_stack) + (title,)
+            current_key = f"pdf-heading:{item_number}:{level}"
+            source.sections[current_key] = SectionSpec(
+                key=current_key,
+                heading_path=current_path,
+                parent_key=parent_key,
+                detected_heading_level=level,
+            )
+            heading_stack.append((level, title, current_key))
+        if label in {"table", "document_index"}:
+            table = item
+            table_id = f"docling:{getattr(item, 'self_ref', item_number)}"
+            caption = str(table.caption_text(document) or "").strip()
+            local_units: list[SourceUnit] = []
+            if caption:
+                local_units.append(
+                    SourceUnit(
+                        text=caption,
+                        locator=f"p.{page}" if page else f"item {item_number}",
+                        section_key=current_key,
+                        heading_path=current_path,
+                        block_type="table_caption",
+                        page_number=page,
+                        page_numbers=page_numbers,
+                        table_id=table_id,
+                    )
+                )
+            data = table.data
+            row_count, col_count = int(data.num_rows), int(data.num_cols)
+            grid = [[""] * col_count for _ in range(row_count)]
+            header_rows: set[int] = set()
+            for cell in data.table_cells:
+                row_start = int(cell.start_row_offset_idx)
+                row_end = min(int(cell.end_row_offset_idx), row_count)
+                col_start = int(cell.start_col_offset_idx)
+                if getattr(cell, "column_header", False):
+                    header_rows.update(range(row_start, row_end))
+                if 0 <= row_start < row_count and 0 <= col_start < col_count:
+                    for row_index in range(row_start, row_end):
+                        grid[row_index][col_start] = str(cell.text)
+            row_units = [
+                SourceUnit(
+                    text=" | ".join(row),
+                    locator=f"p.{page}" if page else f"item {item_number}",
+                    section_key=current_key,
+                    heading_path=current_path,
+                    block_type="table_row",
+                    page_number=page,
+                    page_numbers=page_numbers,
+                    table_id=table_id,
+                    table_row_index=row_index,
+                    is_table_header=row_index in header_rows,
+                )
+                for row_index, row in enumerate(grid)
+                if any(row)
+            ]
+            first_row_index = len(source.units) + len(local_units)
+            header_indexes = tuple(
+                first_row_index + row_offset
+                for row_offset, row in enumerate(row_units)
+                if row.is_table_header
+            )
+            local_units.extend(
+                SourceUnit(
+                    **{
+                        **row.__dict__,
+                        "table_header_indexes": header_indexes,
+                    }
+                )
+                for row in row_units
+            )
+            source.units.extend(local_units)
+            if page is not None and local_units:
+                source_pages.update(page_numbers or (page,))
+            continue
+        if label == "section_header":
+            block_text = str(getattr(item, "text", "")).strip()
+            block_type = "heading"
+        else:
+            if getattr(item, "self_ref", "") in caption_refs:
+                continue
+            block_text = str(getattr(item, "text", getattr(item, "orig", ""))).strip()
+            block_type = (
+                "list"
+                if label == "list_item"
+                else ("caption" if label == "caption" else "paragraph")
+            )
+            if label == "list_item":
+                marker = str(getattr(item, "marker", "-")).strip()
+                block_text = f"{marker} {block_text}".strip()
+        if not block_text:
+            continue
+        if page is not None:
+            source_pages.update(page_numbers or (page,))
+        locator = f"p.{page}" if page is not None else f"item {item_number}"
+        source.units.append(
+            SourceUnit(
+                text=block_text,
+                locator=locator,
+                section_key=current_key,
+                heading_path=current_path,
+                block_type=block_type,
+                page_number=page,
+                page_numbers=page_numbers,
+                detected_heading_level=(
+                    item.level
+                    if label == "section_header" and isinstance(getattr(item, "level", None), int)
+                    else None
+                ),
+            )
+        )
+    if pages:
+        source.empty_pages = [f"p.{page}" for page in pages if page not in source_pages]
+    if not source.units:
+        raise ValueError(f"Scanned or empty PDF cannot be indexed: {path.name}; OCR is disabled")
+    for page in sorted(source_pages):
+        page_length = sum(
+            len(unit.text)
+            for unit in source.units
+            if page in (unit.page_numbers or ((unit.page_number,) if unit.page_number else ()))
+        )
+        if page_length < 50:
+            source.poor_pages.append(f"p.{page}")
+    return source
 
 
 def _txt_blocks(path: Path) -> list[tuple[str, str]]:
@@ -496,6 +915,7 @@ def _update_index(
     chunk_size = int(os.getenv("SPECTRO_RAG_CHUNK_SIZE", _CHUNK_SIZE))
     chunk_overlap = int(os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP))
     _split_text("config validation", chunk_size, chunk_overlap)
+    pdf_backend = _pdf_backend()
     identity = providers.embedding_identity(settings) if semantic else "bm25-only"
     current_embedding_config = _embedding_config(settings, identity)
     reusable_vectors: dict[str, list[float]] = {}
@@ -558,14 +978,30 @@ def _update_index(
             content = path.read_bytes()
             version = _sha256(content)
             if path.suffix.casefold() == ".md":
-                blocks = _markdown_blocks(path)
-                empty_pages, poor_pages = [], []
+                structured = markdown_source(path.read_text(encoding="utf-8-sig"))
+                passages = pack_source(structured, chunk_size, chunk_overlap, _split_text)
+                empty_pages, poor_pages = structured.empty_pages, structured.poor_pages
+            elif path.suffix.casefold() == ".pdf" and pdf_backend == "docling":
+                structured = _docling_pdf_source(path, _ROOT / ".cache" / "docling" / "models")
+                passages = pack_source(structured, chunk_size, chunk_overlap, _split_text)
+                empty_pages, poor_pages = structured.empty_pages, structured.poor_pages
             else:
                 blocks, empty_pages, poor_pages = _extract(path)
+                structured = _legacy_structured(blocks)
+                passages = [
+                    PackedPassage(
+                        text=unit.text,
+                        section_key=unit.section_key,
+                        spans=(BlockSpan(index, 0, len(unit.text)),),
+                    )
+                    for index, unit in enumerate(structured.units)
+                ]
         except Exception as exc:
             raise ValueError(f"Cannot extract source {filename}: {exc}") from exc
         page_numbers = [
-            int(m.group(1)) for locator, _ in blocks if (m := re.match(r"p\.(\d+)", locator))
+            page
+            for unit in structured.units
+            for page in (unit.page_numbers or ((unit.page_number,) if unit.page_number else ()))
         ] + [int(value.split(".", 1)[1]) for value in empty_pages]
         file_record = {
             "source_id": source_id,
@@ -581,11 +1017,99 @@ def _update_index(
             "page_count": max(page_numbers, default=0),
             "empty_pages": empty_pages,
             "poor_extraction_pages": poor_pages,
-            "chunk_count": len(blocks),
+            "chunk_count": len(passages),
+            "pdf_backend": pdf_backend if path.suffix.casefold() == ".pdf" else None,
+            "heading_hierarchy_valid": (
+                all(section.hierarchy_valid for section in structured.sections.values())
+                if path.suffix.casefold() == ".pdf" and pdf_backend == "docling"
+                else None
+            ),
+            "extraction_diagnostics": list(structured.diagnostics),
         }
         files.append(file_record)
         review_overrides = source.get("page_review", {})
-        for number, (locator, excerpt) in enumerate(blocks, 1):
+        document_id = file_record["document_id"]
+        unit_block_ids: dict[int, str] = {}
+        unit_locations: dict[int, list[SourceLocation]] = {}
+        section_ids = {
+            key: _sha256(f"{document_id}:{key}:{json.dumps(spec.heading_path)}".encode())
+            for key, spec in structured.sections.items()
+        }
+        for section_key, section_spec in structured.sections.items():
+            section_id = section_ids[section_key]
+            source_sections[section_id] = SourceSection(
+                section_id=section_id,
+                document_id=document_id,
+                source_id=source_id,
+                filename=filename,
+                document_version=version,
+                heading_path=list(section_spec.heading_path),
+                parent_section_id=(
+                    section_ids.get(section_spec.parent_key) if section_spec.parent_key else None
+                ),
+                detected_heading_level=section_spec.detected_heading_level,
+                hierarchy_valid=section_spec.hierarchy_valid,
+                diagnostics=list(section_spec.diagnostics),
+            ).model_dump()
+        for unit_index, unit in enumerate(structured.units):
+            section_spec = structured.sections[unit.section_key]
+            section_id = section_ids[unit.section_key]
+            block_id = _sha256(
+                f"{document_id}:{unit_index}:{unit.locator}:{_sha256(unit.text.encode())}".encode()
+            )
+            unit_block_ids[unit_index] = block_id
+            locations_for_unit = (
+                [
+                    SourceLocation(
+                        source_id=source_id,
+                        filename=filename,
+                        document_version=version,
+                        locator=f"p.{page}",
+                        page_number=page,
+                    )
+                    for page in unit.page_numbers
+                ]
+                if unit.page_numbers
+                else [
+                    SourceLocation(
+                        source_id=source_id,
+                        filename=filename,
+                        document_version=version,
+                        locator=unit.locator,
+                        page_number=unit.page_number,
+                        line_start=unit.line_start,
+                        line_end=unit.line_end,
+                    )
+                ]
+            )
+            unit_locations[unit_index] = locations_for_unit
+            location = locations_for_unit[0]
+            source_sections[section_id]["block_ids"].append(block_id)
+            source_blocks[block_id] = SourceBlock(
+                block_id=block_id,
+                document_id=document_id,
+                section_id=section_id,
+                source_id=source_id,
+                filename=filename,
+                document_version=version,
+                ordinal=unit_index,
+                text=unit.text,
+                location=location,
+                locations=locations_for_unit,
+                block_type=unit.block_type,
+                detected_heading_level=unit.detected_heading_level,
+                table_id=unit.table_id,
+                table_row_index=unit.table_row_index,
+                is_table_header=unit.is_table_header,
+                oversized=len(unit.text) > chunk_size,
+            ).model_dump()
+        for unit_index, unit in enumerate(structured.units):
+            if unit.table_header_indexes:
+                source_blocks[unit_block_ids[unit_index]]["table_header_block_ids"] = [
+                    unit_block_ids[header_index] for header_index in unit.table_header_indexes
+                ]
+        for number, passage in enumerate(passages, 1):
+            excerpt = passage.text
             content_hash = _sha256(excerpt.encode())
             chunk_id = _sha256(
                 f"{content_hash}:{_CHUNKING_VERSION}:{chunk_size}:{chunk_overlap}".encode()
@@ -601,48 +1125,43 @@ def _update_index(
                 },
             )
             evidence_id = f"{source_id}-{path.stem}-{version[:12]}-{number:04d}"
-            document_id = _sha256(f"{source_id}:{filename}:{version}".encode())
-            section_locator = re.sub(r"\s*\(chunk \d+/\d+\)$", "", locator)
-            heading = re.search(r"section=([^;]+)", section_locator)
-            heading_path = [heading.group(1).strip()] if heading else []
-            section_id = _sha256(
-                f"{document_id}:{section_locator}:{json.dumps(heading_path)}".encode()
-            )
-            block_id = _sha256(f"{document_id}:{number}:{locator}:{content_hash}".encode())
-            location = SourceLocation(
-                source_id=source_id,
-                filename=filename,
-                document_version=version,
-                locator=locator,
-            )
-            section = SourceSection(
-                section_id=section_id,
-                document_id=document_id,
-                source_id=source_id,
-                filename=filename,
-                document_version=version,
-                heading_path=heading_path,
-            )
-            source_sections.setdefault(section_id, section.model_dump())
-            source_sections[section_id]["block_ids"].append(block_id)
-            source_blocks[block_id] = SourceBlock(
-                block_id=block_id,
-                document_id=document_id,
-                section_id=section_id,
-                source_id=source_id,
-                filename=filename,
-                document_version=version,
-                ordinal=number - 1,
-                text=excerpt,
-                location=location,
-            ).model_dump()
-            page_match = re.match(r"p\.(\d+)", locator)
+            span_by_unit: dict[int, tuple[int, int]] = {}
+            for span in passage.spans:
+                previous = span_by_unit.get(span.unit_index)
+                if previous:
+                    span_by_unit[span.unit_index] = (
+                        min(previous[0], span.start),
+                        max(previous[1], span.end),
+                    )
+                else:
+                    span_by_unit[span.unit_index] = (span.start, span.end)
+            contributing_indices = list(span_by_unit)
+            block_ids = [unit_block_ids[index] for index in contributing_indices]
+            locations_by_identity = {
+                (
+                    location.source_id,
+                    location.filename,
+                    location.document_version,
+                    location.locator,
+                ): location
+                for index in contributing_indices
+                for location in unit_locations[index]
+            }
+            locations = list(locations_by_identity.values())
+            section_id = section_ids[passage.section_key]
+            locator = "; ".join(dict.fromkeys(location.locator for location in locations))
+            page_matches = [re.match(r"p\.(\d+)", location.locator) for location in locations]
             review = (
-                review_overrides.get(page_match.group(1), file_record["review_status"])
-                if page_match
-                else file_record["review_status"]
+                "; ".join(
+                    dict.fromkeys(
+                        review_overrides.get(page.group(1), file_record["review_status"])
+                        for page in page_matches
+                        if page
+                    )
+                )
+                or file_record["review_status"]
             )
-            if page_match and f"p.{page_match.group(1)}" in poor_pages:
+            if any(page and f"p.{page.group(1)}" in poor_pages for page in page_matches):
                 review = f"{review}; poor_extraction_needs_manual_review"
             provenance = {
                 "evidence_id": evidence_id,
@@ -655,8 +1174,18 @@ def _update_index(
                 "filename": filename,
                 "related_source": source.get("related_source"),
                 "citation_format": source.get("citation_format"),
-                "block_id": block_id,
+                "block_id": block_ids[0],
+                "block_ids": block_ids,
+                "block_spans": [
+                    SourceBlockSpan(
+                        block_id=unit_block_ids[index], start=start, end=end
+                    ).model_dump()
+                    for index, (start, end) in span_by_unit.items()
+                ],
+                "source_locations": [location.model_dump() for location in locations],
                 "section_id": section_id,
+                "heading_path": list(structured.sections[passage.section_key].heading_path),
+                "oversized": passage.oversized,
             }
             if provenance not in item["provenance"]:
                 item["provenance"].append(provenance)
@@ -713,7 +1242,7 @@ def _update_index(
             if semantic
             else None
         ),
-        "extraction_fingerprint": _extraction_fingerprint(chunk_size, chunk_overlap),
+        "extraction_fingerprint": _extraction_fingerprint(chunk_size, chunk_overlap, pdf_backend),
         "chunking_version": _CHUNKING_VERSION,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
@@ -825,6 +1354,12 @@ def _validate_database(
             file_record = files_by_identity.get(
                 (section.source_id, section.filename, section.document_version)
             )
+            section_ordinals = [
+                block_map[block_id].ordinal
+                for block_id in section.block_ids
+                if block_id in block_map
+            ]
+            parent = section_map.get(section.parent_section_id)
             if (
                 file_record is None
                 or file_record.get("document_id") != section.document_id
@@ -834,20 +1369,45 @@ def _validate_database(
                 )
                 or len(section.block_ids) != len(set(section.block_ids))
                 or any(block_id not in block_map for block_id in section.block_ids)
-                or [block_map[block_id].ordinal for block_id in section.block_ids]
-                != sorted(block_map[block_id].ordinal for block_id in section.block_ids)
+                or section_ordinals != sorted(set(section_ordinals))
+                or (
+                    section.parent_section_id is not None
+                    and (
+                        parent is None
+                        or parent.document_id != section.document_id
+                        or parent.source_id != section.source_id
+                        or parent.filename != section.filename
+                        or parent.document_version != section.document_version
+                        or section.heading_path[: len(parent.heading_path)] != parent.heading_path
+                    )
+                )
             ):
                 raise ValueError("Staged knowledge index has dangling section blocks")
+            parent_ids = {section.section_id}
+            ancestor = parent
+            while ancestor is not None:
+                if ancestor.section_id in parent_ids:
+                    raise ValueError("Staged knowledge index has cyclic section ancestry")
+                parent_ids.add(ancestor.section_id)
+                ancestor = section_map.get(ancestor.parent_section_id)
         for block in parsed_blocks:
             section = section_map.get(block.section_id)
-            provenance_locator = next(
-                (
-                    provenance.get("page_or_section")
-                    for chunk in chunks.values()
-                    for provenance in chunk["chunk"].get("provenance", [])
-                    if provenance.get("block_id") == block.block_id
-                ),
-                None,
+            provenance_locations = [
+                location
+                for chunk in chunks.values()
+                for provenance in chunk["chunk"].get("provenance", [])
+                if block.block_id in provenance.get("block_ids", [provenance.get("block_id")])
+                for location in provenance.get("source_locations", [])
+                if location.get("source_id") == block.source_id
+                and location.get("filename") == block.filename
+                and location.get("document_version") == block.document_version
+                and location.get("locator") == block.location.locator
+            ]
+            legacy_provenance = any(
+                provenance.get("block_id") == block.block_id
+                and provenance.get("page_or_section") == block.location.locator
+                for chunk in chunks.values()
+                for provenance in chunk["chunk"].get("provenance", [])
             )
             if (
                 block_memberships.get(block.block_id) != 1
@@ -860,25 +1420,78 @@ def _validate_database(
                 or block.location.source_id != block.source_id
                 or block.location.filename != block.filename
                 or block.location.document_version != block.document_version
-                or block.location.locator != provenance_locator
+                or not provenance_locations
+                and not legacy_provenance
+                or len(block.table_header_block_ids) != len(set(block.table_header_block_ids))
+                or any(header not in block_map for header in block.table_header_block_ids)
+                or any(
+                    block_map[header].section_id != block.section_id
+                    or block_map[header].table_id != block.table_id
+                    or not block_map[header].is_table_header
+                    for header in block.table_header_block_ids
+                )
             ):
                 raise ValueError(
                     "Evidence citation points outside source pages or disagrees with its block"
                 )
         for chunk in chunks.values():
+            text = chunk["chunk"].get("text")
             for provenance in chunk["chunk"].get("provenance", []):
-                block = block_map.get(provenance.get("block_id"))
-                if block and provenance.get("document_version") != block.document_version:
-                    raise ValueError("Evidence citation points to an unknown source version")
+                block_ids = provenance.get("block_ids") or [provenance.get("block_id")]
+                spans = provenance.get("block_spans")
                 if (
-                    block is None
+                    not isinstance(block_ids, list)
+                    or not block_ids
+                    or any(block_id not in block_map for block_id in block_ids)
+                ):
+                    raise ValueError("Staged knowledge index has inconsistent chunk provenance")
+                referenced = [block_map[block_id] for block_id in block_ids]
+                if any(
+                    provenance.get("document_version") != block.document_version
                     or provenance.get("section_id") != block.section_id
                     or provenance.get("source_id") != block.source_id
                     or provenance.get("filename") != block.filename
-                    or provenance.get("document_version") != block.document_version
-                    or block.text != chunk["chunk"].get("text")
+                    for block in referenced
                 ):
-                    raise ValueError("Staged knowledge index has inconsistent chunk provenance")
+                    raise ValueError("Evidence citation points to an unknown source version")
+                if spans is None:
+                    # Schema-v3 indexes created before structure-aware packing store one
+                    # complete source block per passage and remain readable.
+                    if len(referenced) != 1 or referenced[0].text != text:
+                        raise ValueError("Staged knowledge index has inconsistent chunk provenance")
+                    continue
+                try:
+                    parsed_spans = [SourceBlockSpan.model_validate(span) for span in spans]
+                except Exception as exc:
+                    raise ValueError("Staged knowledge index has invalid block spans") from exc
+                if [span.block_id for span in parsed_spans] != block_ids:
+                    raise ValueError("Staged knowledge index block spans do not match block IDs")
+                expected_location_map = {
+                    (
+                        location.source_id,
+                        location.filename,
+                        location.document_version,
+                        location.locator,
+                    ): location.model_dump()
+                    for block in referenced
+                    for location in (block.locations or [block.location])
+                }
+                expected_locations = list(expected_location_map.values())
+                if provenance.get("source_locations") != expected_locations or provenance.get(
+                    "page_or_section"
+                ) != "; ".join(
+                    dict.fromkeys(location["locator"] for location in expected_locations)
+                ):
+                    raise ValueError(
+                        "Staged knowledge index has inconsistent source locations; "
+                        "citation may point outside source pages"
+                    )
+                if any(
+                    span.end > len(block_map[span.block_id].text)
+                    or block_map[span.block_id].text[span.start : span.end] not in text
+                    for span in parsed_spans
+                ):
+                    raise ValueError("Staged knowledge index has inconsistent source spans")
 
 
 def _tokens(text: str) -> list[str]:
@@ -1003,7 +1616,11 @@ class EvidenceRetriever:
             raise ValueError("Knowledge index chunking settings changed; run Update Knowledge Base")
         if index.get("schema_version") == _INDEX_SCHEMA_VERSION and index.get(
             "extraction_fingerprint"
-        ) != _extraction_fingerprint(int(index["chunk_size"]), int(index["chunk_overlap"])):
+        ) != _extraction_fingerprint(
+            int(index["chunk_size"]),
+            int(index["chunk_overlap"]),
+            _pdf_backend(),
+        ):
             raise ValueError(
                 "Knowledge index extraction settings changed; run Update Knowledge Base"
             )
@@ -1097,9 +1714,18 @@ class EvidenceRetriever:
                 if provenance["evidence_id"] in evidence_ids:
                     raise ValueError("Evidence citation ID is duplicated; run reindex")
                 evidence_ids.add(provenance["evidence_id"])
-                page = re.match(r"p\.(\d+)", provenance["page_or_section"])
-                if page and not 1 <= int(page.group(1)) <= source_record["page_count"]:
-                    raise ValueError("Evidence citation points outside source pages; run reindex")
+                locations = provenance.get("source_locations", [])
+                page_locators = (
+                    [location.get("locator", "") for location in locations]
+                    if locations
+                    else [provenance["page_or_section"]]
+                )
+                for locator in page_locators:
+                    page = re.match(r"p\.(\d+)", locator)
+                    if page and not 1 <= int(page.group(1)) <= source_record["page_count"]:
+                        raise ValueError(
+                            "Evidence citation points outside source pages; run reindex"
+                        )
         return index
 
     def search(self, use_case: CustomerUseCase, limit: int = 8) -> list[RetrievedEvidence]:

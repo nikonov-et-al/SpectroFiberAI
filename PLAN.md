@@ -20,6 +20,15 @@ Keep the demo functional after every milestone. Parent expansion defaults off.
 
 **Acceptance:** fixture coverage and real AFS inspection establish correct reading order, heading boundaries and table/value associations. Full suite and demo smoke pass before Docling becomes default.
 
+**Real-source gate blocker — 2026-10-18:** Docling 2.140.0 installs on Windows
+Python 3.14.4, but S01 p.6 maps the UV/Visible cuvette physical phenomenon to
+`diffuse reflection` where the original table states `absorption`. Two focused
+config attempts (accurate without cell matching; fast with cell matching) did not
+resolve it. Heading inference also assigns incorrect depths/caption sections;
+disabling style signals does not establish correct nesting. Keep pypdf default,
+Docling explicit with review warnings, and original milestone pending. Continue
+safe Markdown/context/other-format work. No further tuning under this request.
+
 ### 3. Parent context, disabled by default
 
 - Add `SPECTRO_RAG_PARENT_EXPANSION=false`. Disabled path retains existing selection and budgeting behavior.

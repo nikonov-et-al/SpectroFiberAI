@@ -16,7 +16,11 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["openai>=2,<3"]
-rag = ["numpy>=2.3,<3", "pypdf>=6,<7"]
+rag = [
+    "docling>=2.140,<3",
+    "numpy>=2.3,<3",
+    "pypdf>=6,<7",
+]
 rerank = ["sentence-transformers>=5.2,<6"]
 
 [dependency-groups]

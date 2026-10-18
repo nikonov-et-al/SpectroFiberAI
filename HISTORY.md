@@ -680,3 +680,29 @@ Sol reviewed typed v3 structure records, file/provenance anchors and atomic repl
 Acceptance: 153 tests passed; `uv run ruff check .` passed; `uv run ruff format --check .` passed (53 files); Streamlit health smoke returned HTTP 200/ok. Full tests used an approved unsandboxed process after sandbox AppTest stalled.
 
 Deviation: schema 2 has no complete embedding-configuration record, so its vectors are conservatively rebuilt on migration; subsequent v3 parser updates reuse identical inputs. Active demo index was not migrated automatically.
+
+
+## Implemented — 2026-10-18 — Structure-aware milestone 2 (acceptance blocked)
+
+### Original milestone text
+
+### 2. PDF and Markdown ingestion
+
+- Add locked Docling dependencies and explicit local-model setup. Verify Windows/Python 3.14 compatibility before switching PDF default.
+- Configure CPU conversion, table extraction, local assets, OCR disabled and remote services disabled. Keep explicit `pypdf` backend available for compatibility and comparison; never silently switch backend after an error.
+- Explicitly enable `HeadingHierarchyOptions(enabled=True)` and `generate_parsed_pages=True`; explicitly configure bookmark, numbering and style signals. Pin resolved settings in extraction fingerprint. Docling otherwise leaves PDF headings flat by default. [Official heading documentation](https://docling-project.github.io/docling/usage/heading_levels/)
+- Treat inferred nesting as extraction output requiring validation. Check levels, source order, page bounds, parent relationships and numbering consistency; retain diagnostics and original detected levels.
+- On invalid/ambiguous nesting, use flat page-local sections and suppress cross-section expansion. Do not invent corrected hierarchy. Visually compare extracted outlines with actual AFS pages before acceptance.
+- Preserve PDF paragraphs, table headers, rows, captions and original block/page locations. Preserve Markdown heading hierarchy, paragraphs, lists, fenced blocks and tables.
+- Keep 1,200-character target and existing overlap setting. Pack within structural boundaries; overlap applies only to split prose. Split large tables by rows, repeating source headers. Preserve and flag indivisible oversized rows.
+- Keep TXT, DOCX and XLSX behavior unchanged during this milestone.
+
+**Acceptance:** fixture coverage and real AFS inspection establish correct reading order, heading boundaries and table/value associations. Full suite and demo smoke pass before Docling becomes default.
+
+### Implementation and verification
+
+Sol reviewed structure records, source spans, PDF heading validation, local-only Docling setup, exact conversion status checking, and multi-page provenance handling. Markdown now preserves block structure. Docling 2.140.0 is locked and verified in isolated Windows CPython 3.14.4 with rag/rerank extras. Real S01/S04 production adapter runs completed; invalid heading nesting produced flat page-local sections. Ambiguous multi-page tables fail explicitly rather than inventing row-page mapping.
+
+Verification: 171 tests passed; Ruff lint/format passed (59 files); Streamlit HTTP 200/ok. Normal tests mock Docling; separate real conversions used explicitly cached assets.
+
+Not accepted: real S01 p.6 table mapping remains wrong after two focused configuration attempts. Keep pypdf default and original milestone in PLAN.md; no further parser tuning or scientific/default promotion. Parent/context and broader formats can proceed independently. See docs/STRUCTURE_CONTEXT_REVIEW.md.

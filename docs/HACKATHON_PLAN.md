@@ -13,8 +13,10 @@ open. Prior counts below are historical.
 
 Structure-aware ingestion is being delivered in independently verified milestones.
 Schema 3 adds source block/section relationships while retaining schema 2 reading;
-updates remain explicit and atomic. PDF/Markdown structure and bounded parent
-context are next. Parent expansion defaults off until regression and real-source
+updates remain explicit and atomic. Markdown structure and opt-in local Docling
+PDF conversion are implemented; pypdf stays default because real AFS table and
+heading extraction failed the promotion gate after two focused configuration
+attempts. Bounded parent context is next. Parent expansion defaults off until regression and real-source
 review gates pass; this work does not establish scientific acceptance.
 
 - Python 3.14 with uv-managed locked dependencies.

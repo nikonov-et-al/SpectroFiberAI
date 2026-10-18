@@ -47,6 +47,17 @@ class SourceLocation(DomainModel):
     filename: str
     document_version: str
     locator: str
+    page_number: int | None = Field(default=None, ge=1)
+    line_start: int | None = Field(default=None, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def valid_line_range(self) -> SourceLocation:
+        if (self.line_start is None) != (self.line_end is None):
+            raise ValueError("Source line locations require both start and end")
+        if self.line_start is not None and self.line_end < self.line_start:
+            raise ValueError("Source line end must not precede its start")
+        return self
 
 
 class SourceSection(DomainModel):
@@ -57,6 +68,21 @@ class SourceSection(DomainModel):
     document_version: str
     heading_path: list[str] = Field(default_factory=list)
     block_ids: list[str] = Field(default_factory=list)
+    parent_section_id: str | None = None
+    detected_heading_level: int | None = None
+    hierarchy_valid: bool = True
+    diagnostics: list[str] = Field(default_factory=list)
+
+
+SourceBlockType = Literal[
+    "paragraph",
+    "heading",
+    "list",
+    "code",
+    "table_caption",
+    "table_row",
+    "caption",
+]
 
 
 class SourceBlock(DomainModel):
@@ -69,6 +95,36 @@ class SourceBlock(DomainModel):
     ordinal: int = Field(ge=0)
     text: str
     location: SourceLocation
+    locations: list[SourceLocation] = Field(default_factory=list)
+    block_type: SourceBlockType = "paragraph"
+    detected_heading_level: int | None = None
+    table_id: str | None = None
+    table_row_index: int | None = Field(default=None, ge=0)
+    is_table_header: bool = False
+    table_header_block_ids: list[str] = Field(default_factory=list)
+    oversized: bool = False
+
+    @model_validator(mode="after")
+    def valid_table_metadata(self) -> SourceBlock:
+        if self.table_row_index is not None and self.table_id is None:
+            raise ValueError("Table row metadata requires a table identity")
+        if self.is_table_header and self.block_type != "table_row":
+            raise ValueError("Only table rows can be marked as table headers")
+        if self.table_header_block_ids and self.table_id is None:
+            raise ValueError("Table header references require a table identity")
+        return self
+
+
+class SourceBlockSpan(DomainModel):
+    block_id: str
+    start: int = Field(ge=0)
+    end: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def valid_span(self) -> SourceBlockSpan:
+        if self.end <= self.start:
+            raise ValueError("Source block span must be non-empty")
+        return self
 
 
 CUSTOMER_FACT_FIELDS = (

@@ -150,14 +150,19 @@ def test_v3_structure_records_validate_and_v2_index_remains_readable(tmp_path, m
     current = retriever.index_metadata()
     assert current["schema_version"] == 3
     block = current["source_blocks"][0]
-    section = current["sections"][0]
+    section_index = next(
+        index
+        for index, item in enumerate(current["sections"])
+        if item["section_id"] == block["section_id"]
+    )
+    section = current["sections"][section_index]
     assert block["block_id"] in section["block_ids"]
     assert block["section_id"] == section["section_id"]
     assert current["chunks"][0]["provenance"][0]["block_id"] == block["block_id"]
     with closing(sqlite3.connect(index_path)) as db:
         original_metadata = db.execute("SELECT value FROM metadata").fetchone()[0]
         broken = json.loads(original_metadata)
-        broken["sections"][0]["block_ids"][0] = "dangling-block"
+        broken["sections"][section_index]["block_ids"][0] = "dangling-block"
         db.execute("UPDATE metadata SET value = ?", (json.dumps(broken),))
         db.commit()
     with pytest.raises(ValueError, match="dangling section blocks"):

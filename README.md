@@ -161,6 +161,33 @@ the exact embedding input and embedding configuration are unchanged. Model/confi
 changes or invalid cached vectors prevent unsafe reuse.
 These defaults are engineering choices, not measured scientific optima.
 
+### Structure-aware ingestion
+
+Markdown ingestion preserves heading ancestry, paragraphs, lists, fenced blocks,
+table rows and explicit headers. Index schema 3 records source blocks separately
+from packed retrieval passages, including exact source spans and locations.
+Titles and heading paths remain metadata; embedding input is still passage text.
+
+The PDF default remains `pypdf`. Docling 2.140+ is available explicitly through
+the `rag` extra, with CPU layout/table models and validated heading inference:
+
+```powershell
+uv sync --extra rag
+uv run --extra rag python scripts/setup_docling.py
+$env:SPECTRO_PDF_BACKEND = "docling"
+```
+
+Then explicitly update the knowledge base. Normal conversion uses local model
+assets, with OCR and remote services disabled; missing assets or conversion
+failures preserve the prior index and do not switch parsers silently. Set
+`SPECTRO_PDF_BACKEND=pypdf` and update again to select the existing parser.
+
+Docling has **not passed the real AFS source gate**: S01 p.6 has an incorrect
+table-cell association after two configuration attempts. Detected heading nesting
+also needs validation; invalid nesting uses flat page-local sections. Do not
+treat extracted specifications as approved. See
+[source-review findings](docs/STRUCTURE_CONTEXT_REVIEW.md).
+
 ### Optional local reranker (English trial)
 
 Default retrieval is unchanged. To try CPU cross-encoder reranking, install the
