@@ -1,3 +1,5 @@
+> Historical baseline workflow review. Parser/rule expectations and reproduction instructions below are superseded by the 2026-10-18 LLM-only architecture. Current evaluation CLI is documented in README; this record is preserved unchanged below.
+
 # Synthetic workflow review — 2026-10-16
 
 Reproduce: `uv run python scripts/evaluate.py`. Six full JSON and Markdown reports

@@ -26,7 +26,9 @@ require correction regardless of total.** A high score is not industrial validat
 Six synthetic reviews, reproducible outputs, partial software scores and outstanding
 expert questions are in [EVALUATION_RESULTS.md](EVALUATION_RESULTS.md). Generate JSON
 and Markdown with `uv run python scripts/evaluate.py`; fixtures are separate from the
-four original examples. Do not assign scientific plausibility scores without an expert.
+four original examples. Generation now requires configured Ollama or OpenAI and the evidence index; historical baseline results do not validate the current pipeline. Do not assign scientific plausibility scores without an expert.
 
-Current cases test software behavior. Future evaluation needs real challenge examples,
+Current cases test software behavior. Live evaluation needs supplied challenge enquiries,
 expert labels, representative edge cases, and failures. Compare providers separately.
+
+Current local run: [31-case LLM evaluation](LLM_EVALUATION.md).
