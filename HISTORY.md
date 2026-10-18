@@ -953,3 +953,41 @@ Human scientific acceptance remains pending in PLAN_EVIDENCE_ASSESSMENT.md. Phas
 retrieval labels, parser/context usefulness and demo rehearsal remain open in PLAN.md.
 Ranking and experiment-selection improvements remain Step 2. No challenge, hardware
 or customer-performance facts have been invented or validated.
+
+## Completed — 2026-10-18 — Focused review of all five prompts
+
+### Original request
+
+> Please dont use subagents in this case do it yourself. Please look at all [prompts](prompts/) and edit if nesesarry. Improve. I attach the example from other chat. But be critical.
+
+### Implementation and review
+
+Reviewed all five prompts against the attached critique, current schemas, provider
+construction, application-evidence guards and canonical candidate projection.
+Clarified conditional extraction, complementary retrieval, bounded application
+support versus exploratory transfer, proposed versus demonstrated capability,
+unsupported-option handling, source settings versus study proposals, and
+risk-dependent future experiment design. Fixed observation/coverage context field
+instructions. Retained query limits, schema contracts and future-only experiment
+integration. Review rationale and limits are in docs/PROMPT_REVIEW.md.
+
+After the user requested direct work, the earlier subagent was stopped before
+making edits. All accepted edits were made and reviewed by the primary agent.
+
+### Verification
+
+- Full pytest: 268 passed in 10.80s, including 12 Streamlit AppTests.
+- Ruff check: all checks passed; Ruff format check: 75 files already formatted.
+- git diff --check: passed for changed prompts.
+- Used local uv with offline/no-sync, explicit project Python and repository-local
+  cache/temp paths. Initial default-cache and pytest-temp writes failed in the
+  sandbox. The sandbox full-suite run stalled in Python local socket-pair creation
+  before app execution; the approved run outside the sandbox passed the full suite.
+  Separate sandbox run excluding AppTests: 256 passed.
+
+### Deviations and remaining risks
+
+No live model benchmark or expert scientific acceptance claimed. Added prompt
+instructions consume context; evidence retention and semantic-quality improvement
+remain unmeasured. Existing scientific gates and pending PLAN tasks remain open.
+No schema, provider logic, retrieval default, architecture or challenge facts changed.
