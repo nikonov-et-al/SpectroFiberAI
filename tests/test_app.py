@@ -9,7 +9,10 @@ from spectro_ai.models import (
     AssessmentReport,
     CustomerUseCase,
     EvidenceClaim,
+    EvidenceContextBlock,
     FeasibilityPlan,
+    RetrievedEvidence,
+    SourceLocation,
     TechniqueCandidate,
     ValidationDiagnostic,
 )
@@ -96,6 +99,53 @@ def test_blank_input_and_stale_report_behavior(monkeypatch: pytest.MonkeyPatch) 
     app.text_area[0].input("Changed problem.").run()
     assert not app.json
     assert not app.get("download_button")
+
+
+def test_app_shows_attached_source_context_expander(monkeypatch: pytest.MonkeyPatch) -> None:
+    def assess(text: str, *, retriever=None) -> AssessmentReport:
+        report = _abstention(text)
+        report.retrieved_evidence = [
+            RetrievedEvidence(
+                evidence_id="child-1",
+                source_id="S01",
+                document_version="version-1",
+                page_or_section="p.2",
+                excerpt="NIR table excerpt.",
+                review_status="reviewed_for_phase2",
+                source_scope="technical_reference; technical",
+                context_blocks=[
+                    EvidenceContextBlock(
+                        block_id="block-1",
+                        document_id="doc-1",
+                        section_id="section-1",
+                        source_id="S01",
+                        filename="fixture.md",
+                        document_version="version-1",
+                        text="Adjacent operating condition: 25 °C.",
+                        source_locations=[
+                            SourceLocation(
+                                source_id="S01",
+                                filename="fixture.md",
+                                document_version="version-1",
+                                locator="L7-L7",
+                                line_start=7,
+                                line_end=7,
+                            )
+                        ],
+                        review_status="reviewed_for_phase2",
+                        source_scope="technical_reference; technical",
+                    )
+                ],
+            )
+        ]
+        return report
+
+    monkeypatch.setattr(providers, "assess_problem", assess)
+    app = AppTest.from_file(str(APP), default_timeout=15).run()
+    app.text_area[0].input("We measure moisture in flour.").run()
+    app.button[1].click().run()
+    assert not app.exception
+    assert any("Attached context" in expander.label for expander in app.expander)
 
 
 def test_reranker_configuration_change_invalidates_cached_report(monkeypatch):

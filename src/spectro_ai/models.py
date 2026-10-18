@@ -103,6 +103,8 @@ class SourceBlock(DomainModel):
     is_table_header: bool = False
     table_header_block_ids: list[str] = Field(default_factory=list)
     oversized: bool = False
+    review_status: str = "needs_source_review"
+    source_scope: str | None = None
 
     @model_validator(mode="after")
     def valid_table_metadata(self) -> SourceBlock:
@@ -231,6 +233,7 @@ class EvidenceClaim(DomainModel):
     claim: str
     evidence_id: str
     quote: str
+    context_block_id: str | None = None
 
 
 class TechniqueCandidate(DomainModel):
@@ -265,6 +268,25 @@ class FeasibilityPlan(DomainModel):
     failure_actions: list[str] = Field(default_factory=list)
 
 
+class EvidenceContextBlock(DomainModel):
+    block_id: str
+    document_id: str
+    section_id: str
+    source_id: str
+    filename: str
+    document_version: str
+    text: str
+    source_locations: list[SourceLocation] = Field(default_factory=list)
+    review_status: str = "needs_source_review"
+    source_scope: str | None = None
+
+    @model_validator(mode="after")
+    def has_source_locations(self) -> EvidenceContextBlock:
+        if not self.source_locations:
+            raise ValueError("Context blocks require exact source locations")
+        return self
+
+
 class RetrievedEvidence(DomainModel):
     evidence_id: str
     source_id: str
@@ -275,6 +297,9 @@ class RetrievedEvidence(DomainModel):
     retrieval_score: float | None = None
     rerank_score: float | None = None
     source_scope: str | None = None
+    source_locations: list[SourceLocation] = Field(default_factory=list)
+    context_blocks: list[EvidenceContextBlock] = Field(default_factory=list)
+    context_omissions: list[str] = Field(default_factory=list)
 
 
 class RetrievalDiagnostic(DomainModel):

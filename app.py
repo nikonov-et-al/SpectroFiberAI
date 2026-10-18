@@ -77,6 +77,7 @@ knowledge_config_signature = (
     os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
     os.getenv("SPECTRO_RAG_EVIDENCE_COUNT", "8"),
     os.getenv("SPECTRO_RAG_CONTEXT", "4096"),
+    os.getenv("SPECTRO_RAG_PARENT_EXPANSION", "false"),
     os.getenv("SPECTRO_RAG_RERANKER", "none"),
     os.getenv("SPECTRO_RAG_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L6-v2"),
     os.getenv("SPECTRO_RAG_RERANKER_REVISION", "main"),
@@ -254,6 +255,21 @@ if report is not None and st.session_state.get("report_input") == problem and no
     )
     with report_tab:
         st.markdown(markdown)
+        for item in report.retrieved_evidence:
+            if item.context_blocks:
+                with st.expander(
+                    f"Attached context · {item.source_id} {item.page_or_section or ''} · "
+                    "same source"
+                ):
+                    st.caption(
+                        f"Attached to {item.evidence_id}; context is not independent corroboration."
+                    )
+                    for block in item.context_blocks:
+                        locations = ", ".join(
+                            location.locator for location in block.source_locations
+                        )
+                        st.markdown(f"**{locations} · {block.review_status}**")
+                        st.markdown(block.text)
     with diagnostics_tab:
         st.markdown(render_markdown(report, include_diagnostics=True))
         diagnostics = getattr(report, "validation_diagnostics", [])

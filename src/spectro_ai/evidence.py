@@ -27,6 +27,7 @@ import yaml
 from spectro_ai.knowledge import KnowledgeSource
 from spectro_ai.models import (
     CustomerUseCase,
+    EvidenceContextBlock,
     RetrievedEvidence,
     SourceBlock,
     SourceBlockSpan,
@@ -122,6 +123,19 @@ def _pdf_backend() -> str:
     if backend not in {"pypdf", "docling"}:
         raise ValueError("SPECTRO_PDF_BACKEND must be 'pypdf' or 'docling'")
     return backend
+
+
+def _parent_expansion_enabled(value: bool | None) -> bool:
+    if value is not None:
+        if not isinstance(value, bool):
+            raise ValueError("parent_expansion must be a boolean or None")
+        return value
+    setting = os.getenv("SPECTRO_RAG_PARENT_EXPANSION", "false").strip().casefold()
+    if setting in {"1", "true", "yes", "on"}:
+        return True
+    if setting in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError("SPECTRO_RAG_PARENT_EXPANSION must be a boolean value")
 
 
 @lru_cache(maxsize=32)
@@ -868,6 +882,116 @@ def _load_old_index(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any
         raise ValueError("Knowledge index is corrupt or incompatible; rebuild it") from None
 
 
+def canonical_context_block(index: dict[str, Any], block_id: str) -> EvidenceContextBlock:
+    """Resolve one context block only from its pinned, validated index snapshot."""
+    raw = next(
+        (block for block in index.get("source_blocks", []) if block.get("block_id") == block_id),
+        None,
+    )
+    if raw is None:
+        raise ValueError("Context block is not present in the pinned knowledge index")
+    try:
+        block = SourceBlock.model_validate(raw)
+    except Exception as exc:
+        raise ValueError("Pinned context block is invalid") from exc
+    section = next(
+        (item for item in index.get("sections", []) if item.get("section_id") == block.section_id),
+        None,
+    )
+    file_record = next(
+        (
+            item
+            for item in index.get("files", [])
+            if item.get("source_id") == block.source_id
+            and item.get("filename") == block.filename
+            and item.get("document_version") == block.document_version
+        ),
+        None,
+    )
+    if (
+        section is None
+        or block.block_id not in section.get("block_ids", [])
+        or section.get("document_id") != block.document_id
+        or section.get("source_id") != block.source_id
+        or section.get("filename") != block.filename
+        or section.get("document_version") != block.document_version
+        or file_record is None
+        or file_record.get("document_id") != block.document_id
+    ):
+        raise ValueError("Pinned context block has inconsistent source relationships")
+    if not section.get("hierarchy_valid", True):
+        raise ValueError("Pinned context block belongs to an unvalidated section hierarchy")
+    locations = block.locations or [block.location]
+    if not locations or any(
+        location.source_id != block.source_id
+        or location.filename != block.filename
+        or location.document_version != block.document_version
+        for location in locations
+    ):
+        raise ValueError("Pinned context block has invalid source locations")
+    source_scope = raw.get("source_scope") or "; ".join(
+        value for value in (file_record.get("source_type"), file_record.get("scope")) if value
+    )
+    review_status = raw.get("review_status") or file_record.get(
+        "review_status", "needs_source_review"
+    )
+    return EvidenceContextBlock(
+        block_id=block.block_id,
+        document_id=block.document_id,
+        section_id=block.section_id,
+        source_id=block.source_id,
+        filename=block.filename,
+        document_version=block.document_version,
+        text=block.text,
+        source_locations=locations,
+        review_status=review_status,
+        source_scope=source_scope,
+    )
+
+
+def evidence_context_block_bytes(block: EvidenceContextBlock) -> int:
+    """Return the UTF-8 cost used by retrieval/provider context budgeting."""
+    return evidence_context_blocks_bytes([block])
+
+
+def evidence_context_blocks_bytes(blocks: list[EvidenceContextBlock]) -> int:
+    """Charge a child's complete serialized context field, including JSON overhead."""
+    if not blocks:
+        return 0
+    serialized = json.dumps(
+        {"context_blocks": [block.model_dump(mode="json") for block in blocks]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return len(serialized.encode("utf-8"))
+
+
+def _review_status_for_locations(
+    locations: list[SourceLocation],
+    file_record: dict[str, Any],
+    overrides: dict[str, str],
+) -> str:
+    statuses: list[str] = []
+    poor_pages = set(file_record.get("poor_extraction_pages", []))
+    needs_manual_review = False
+    for location in locations:
+        page_number = location.page_number
+        if page_number is None and (match := re.match(r"p\.(\d+)", location.locator)):
+            page_number = int(match.group(1))
+        if page_number is None:
+            statuses.append(str(file_record.get("review_status", "needs_source_review")))
+            continue
+        page_key = str(page_number)
+        statuses.append(
+            str(overrides.get(page_key, file_record.get("review_status", "needs_source_review")))
+        )
+        needs_manual_review |= f"p.{page_number}" in poor_pages
+    status = "; ".join(dict.fromkeys(statuses)) or "needs_source_review"
+    if needs_manual_review:
+        status = f"{status}; poor_extraction_needs_manual_review"
+    return status
+
+
 def _update_index(
     *,
     manifest_path: Path,
@@ -1102,6 +1226,10 @@ def _update_index(
                 table_row_index=unit.table_row_index,
                 is_table_header=unit.is_table_header,
                 oversized=len(unit.text) > chunk_size,
+                review_status=_review_status_for_locations(
+                    locations_for_unit, file_record, review_overrides
+                ),
+                source_scope="; ".join((file_record["source_type"], file_record["scope"])),
             ).model_dump()
         for unit_index, unit in enumerate(structured.units):
             if unit.table_header_indexes:
@@ -1166,6 +1294,7 @@ def _update_index(
             provenance = {
                 "evidence_id": evidence_id,
                 "source_id": source_id,
+                "document_id": document_id,
                 "document_version": version,
                 "page_or_section": locator,
                 "review_status": str(review),
@@ -1450,6 +1579,7 @@ def _validate_database(
                     provenance.get("document_version") != block.document_version
                     or provenance.get("section_id") != block.section_id
                     or provenance.get("source_id") != block.source_id
+                    or provenance.get("document_id", block.document_id) != block.document_id
                     or provenance.get("filename") != block.filename
                     for block in referenced
                 ):
@@ -1576,6 +1706,7 @@ class EvidenceRetriever:
         semantic_candidates: int = 30,
         context_budget: int = 12000,
         rrf_k: int = 60,
+        parent_expansion: bool | None = None,
     ) -> None:
         from spectro_ai.providers import RagSettings
 
@@ -1586,6 +1717,7 @@ class EvidenceRetriever:
         self.mode = mode
         self.bm25_candidates, self.semantic_candidates = bm25_candidates, semantic_candidates
         self.context_budget, self.rrf_k = context_budget, rrf_k
+        self.parent_expansion = _parent_expansion_enabled(parent_expansion)
         if mode not in {"hybrid", "bm25"}:
             raise ValueError("mode must be 'hybrid' or 'bm25'")
         if bm25_candidates < 1 or semantic_candidates < 1 or context_budget < 1 or rrf_k < 0:
@@ -1805,7 +1937,7 @@ class EvidenceRetriever:
                     query,
                     candidate_limit,
                     index,
-                    apply_context_budget=not (reranking or candidate_mode),
+                    apply_context_budget=not (reranking or candidate_mode or self.parent_expansion),
                 ),
                 1,
             ):
@@ -1867,6 +1999,8 @@ class EvidenceRetriever:
         else:
             if diagnostics is not None:
                 diagnostics.append({"status": "disabled"})
+        if self.parent_expansion:
+            return self._select_with_parent_context(ranked, limit, index)
         selected: list[RetrievedEvidence] = []
         used_bytes = 0
         for score, hit in ranked:
@@ -1878,6 +2012,287 @@ class EvidenceRetriever:
             if len(selected) == limit:
                 break
         return selected
+
+    def _select_with_parent_context(
+        self,
+        ranked: list[tuple[float, RetrievedEvidence]],
+        limit: int,
+        index: dict[str, Any],
+    ) -> list[RetrievedEvidence]:
+        child_capacity = int(self.context_budget * 0.7)
+        context_capacity = self.context_budget - child_capacity
+        child_used = 0
+        selected: list[tuple[float, RetrievedEvidence]] = []
+        selected_ids: set[str] = set()
+        for score, hit in ranked:
+            cost = len(hit.excerpt.encode("utf-8"))
+            if child_used + cost > child_capacity:
+                continue
+            selected.append((score, hit))
+            selected_ids.add(hit.evidence_id)
+            child_used += cost
+            if len(selected) >= limit:
+                break
+
+        provenance_by_id = {
+            provenance.get("evidence_id"): provenance
+            for chunk in index.get("chunks", [])
+            for provenance in chunk.get("provenance", [])
+            if provenance.get("evidence_id")
+        }
+        block_map = {
+            item.get("block_id"): item
+            for item in index.get("source_blocks", [])
+            if isinstance(item, dict) and isinstance(item.get("block_id"), str)
+        }
+        section_map = {
+            item.get("section_id"): item
+            for item in index.get("sections", [])
+            if isinstance(item, dict) and isinstance(item.get("section_id"), str)
+        }
+        child_block_ids_by_evidence = {
+            hit.evidence_id: set(
+                (provenance_by_id.get(hit.evidence_id) or {}).get("block_ids")
+                or [(provenance_by_id.get(hit.evidence_id) or {}).get("block_id")]
+            )
+            - {None}
+            for _score, hit in ranked
+        }
+        fully_covered_by_evidence: dict[str, set[str]] = {}
+        for _score, hit in ranked:
+            provenance = provenance_by_id.get(hit.evidence_id) or {}
+            spans = provenance.get("block_spans")
+            if isinstance(spans, list):
+                fully_covered_by_evidence[hit.evidence_id] = {
+                    span["block_id"]
+                    for span in spans
+                    if isinstance(span, dict)
+                    and isinstance(span.get("block_id"), str)
+                    and isinstance(block_map.get(span["block_id"]), dict)
+                    and span.get("start") == 0
+                    and span.get("end") == len(block_map[span["block_id"]].get("text", ""))
+                }
+            else:
+                # Older schema-v3 passages had one complete source block per child.
+                fully_covered_by_evidence[hit.evidence_id] = {
+                    block_id
+                    for block_id in child_block_ids_by_evidence[hit.evidence_id]
+                    if isinstance(block_map.get(block_id), dict)
+                    and block_map[block_id].get("text") == hit.excerpt
+                }
+        canonical_blocks: dict[str, EvidenceContextBlock] = {}
+
+        def canonical(block_id: str) -> EvidenceContextBlock:
+            if block_id not in canonical_blocks:
+                canonical_blocks[block_id] = canonical_context_block(index, block_id)
+            return canonical_blocks[block_id]
+
+        context_used = 0
+        covered_child_block_ids: set[str] = set().union(
+            *(fully_covered_by_evidence.get(hit.evidence_id, set()) for _score, hit in selected)
+        )
+        attached_block_ids = set(covered_child_block_ids)
+        expanded: list[RetrievedEvidence] = []
+        for score, hit in selected:
+            provenance = provenance_by_id.get(hit.evidence_id)
+            block_ids = (provenance or {}).get("block_ids") or [(provenance or {}).get("block_id")]
+            section = section_map.get((provenance or {}).get("section_id"))
+            omissions: list[str] = []
+            attached: list[EvidenceContextBlock] = []
+            if not section or any(not isinstance(block_id, str) for block_id in block_ids):
+                omissions.append("No validated source section is available for expansion.")
+            elif not section.get("hierarchy_valid", True):
+                omissions.append("Section hierarchy is invalid; context expansion was suppressed.")
+            else:
+                section_blocks = [
+                    block_id for block_id in section.get("block_ids", []) if block_id in block_map
+                ]
+                child_positions = [
+                    section_blocks.index(block_id)
+                    for block_id in block_ids
+                    if block_id in section_blocks
+                ]
+                if not child_positions:
+                    omissions.append("Retrieved child blocks are outside the validated section.")
+                else:
+                    child_block_ids = set(block_ids)
+                    fully_covered_child_blocks = fully_covered_by_evidence.get(
+                        hit.evidence_id, set()
+                    )
+                    available_ids = [
+                        block_id
+                        for block_id in section_blocks
+                        if block_id not in fully_covered_child_blocks
+                        and block_id not in attached_block_ids
+                    ]
+                    full_section = [canonical(block_id) for block_id in available_ids]
+                    full_cost = evidence_context_blocks_bytes(full_section)
+                    remaining = context_capacity - context_used
+                    if full_cost <= remaining:
+                        attached = full_section
+                    else:
+                        attached, omitted = self._context_window(
+                            index=index,
+                            section_blocks=section_blocks,
+                            child_positions=child_positions,
+                            anchor_block_ids=child_block_ids - fully_covered_child_blocks,
+                            child_block_ids=fully_covered_child_blocks,
+                            attached_block_ids=attached_block_ids,
+                            remaining=remaining,
+                            block_map=block_map,
+                            canonical=canonical,
+                        )
+                        if omitted:
+                            omissions.append(omitted)
+                    context_used += evidence_context_blocks_bytes(attached)
+                    attached_block_ids.update(block.block_id for block in attached)
+                    if not attached and not omissions:
+                        omissions.append(
+                            "No surrounding source blocks were available in this section."
+                        )
+            expanded.append(
+                hit.model_copy(
+                    update={
+                        "retrieval_score": score,
+                        "context_blocks": attached,
+                        "context_omissions": omissions,
+                    }
+                )
+            )
+
+        # Use unspent reserved capacity for additional ranked children after context
+        # has been allocated in rank order. These results carry no parent expansion.
+        total_used = child_used + context_used
+        if len(expanded) < limit:
+            for score, hit in ranked:
+                if hit.evidence_id in selected_ids:
+                    continue
+                cost = len(hit.excerpt.encode("utf-8"))
+                if total_used + cost > self.context_budget:
+                    continue
+                child_blocks = fully_covered_by_evidence.get(hit.evidence_id, set())
+                if child_blocks & attached_block_ids:
+                    continue
+                expanded.append(
+                    hit.model_copy(
+                        update={
+                            "retrieval_score": score,
+                            "context_omissions": [
+                                "Context capacity was allocated to higher-ranked children first."
+                            ],
+                        }
+                    )
+                )
+                selected_ids.add(hit.evidence_id)
+                attached_block_ids.update(child_blocks)
+                total_used += cost
+                if len(expanded) >= limit:
+                    break
+        return expanded
+
+    def _context_window(
+        self,
+        *,
+        index: dict[str, Any],
+        section_blocks: list[str],
+        child_positions: list[int],
+        anchor_block_ids: set[str],
+        child_block_ids: set[str],
+        attached_block_ids: set[str],
+        remaining: int,
+        block_map: dict[str, dict[str, Any]],
+        canonical: Any,
+    ) -> tuple[list[EvidenceContextBlock], str | None]:
+        left_edge, right_edge = min(child_positions), max(child_positions)
+        selected: dict[str, EvidenceContextBlock] = {}
+        used = 0
+        left_open = right_open = True
+
+        def bundle(candidate_id: str) -> list[str]:
+            candidate = block_map[candidate_id]
+            required: list[str] = [candidate_id]
+            table_id = candidate.get("table_id")
+            if table_id:
+                required.extend(candidate.get("table_header_block_ids", []))
+                required.extend(
+                    block_id
+                    for block_id in section_blocks
+                    if block_map[block_id].get("table_id") == table_id
+                    and block_map[block_id].get("block_type") == "table_caption"
+                )
+            return list(dict.fromkeys(required))
+
+        max_distance = max(left_edge, len(section_blocks) - right_edge - 1)
+
+        # A packed child can cover only part of its source block. Prefer the
+        # complete original block first so nearby qualifications are recoverable.
+        for anchor_id in section_blocks:
+            if anchor_id not in anchor_block_ids:
+                continue
+            required_ids = bundle(anchor_id)
+            if any(block_id not in section_blocks for block_id in required_ids):
+                continue
+            new_ids = [
+                block_id
+                for block_id in required_ids
+                if block_id not in child_block_ids
+                and block_id not in attached_block_ids
+                and block_id not in selected
+            ]
+            new_blocks = [canonical(block_id) for block_id in new_ids]
+            cost = evidence_context_blocks_bytes(
+                [*selected.values(), *new_blocks]
+            ) - evidence_context_blocks_bytes(list(selected.values()))
+            if used + cost <= remaining:
+                selected.update((block.block_id, block) for block in new_blocks)
+                used += cost
+
+        for distance in range(1, max_distance + 1):
+            candidates = []
+            if left_open and left_edge - distance >= 0:
+                candidates.append(("left", left_edge - distance))
+            if right_open and right_edge + distance < len(section_blocks):
+                candidates.append(("right", right_edge + distance))
+            for side, position in candidates:
+                candidate_id = section_blocks[position]
+                if candidate_id in child_block_ids or candidate_id in attached_block_ids:
+                    continue
+                required_ids = bundle(candidate_id)
+                if any(block_id not in section_blocks for block_id in required_ids):
+                    if side == "left":
+                        left_open = False
+                    else:
+                        right_open = False
+                    continue
+                new_ids = [
+                    block_id
+                    for block_id in required_ids
+                    if block_id not in child_block_ids
+                    and block_id not in attached_block_ids
+                    and block_id not in selected
+                ]
+                new_blocks = [canonical(block_id) for block_id in new_ids]
+                cost = evidence_context_blocks_bytes(
+                    [*selected.values(), *new_blocks]
+                ) - evidence_context_blocks_bytes(list(selected.values()))
+                if used + cost <= remaining:
+                    selected.update((block.block_id, block) for block in new_blocks)
+                    used += cost
+                elif side == "left":
+                    left_open = False
+                else:
+                    right_open = False
+        omission = None
+        if not selected and remaining > 0:
+            omission = "No complete surrounding source block fit the reserved context budget."
+        elif anchor_block_ids and any(
+            block_id not in selected and block_id not in attached_block_ids
+            for block_id in anchor_block_ids
+        ):
+            omission = (
+                "The complete retrieved source block did not fit the reserved context budget."
+            )
+        return [selected[block_id] for block_id in section_blocks if block_id in selected], omission
 
     def _search(
         self,
@@ -1968,6 +2383,10 @@ class EvidenceRetriever:
                         review_status=provenance["review_status"],
                         retrieval_score=fused[chunk_number],
                         source_scope=provenance["source_scope"],
+                        source_locations=[
+                            SourceLocation.model_validate(location)
+                            for location in provenance.get("source_locations", [])
+                        ],
                     )
                 )
                 used_bytes += cost

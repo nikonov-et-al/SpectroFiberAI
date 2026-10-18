@@ -29,21 +29,6 @@ disabling style signals does not establish correct nesting. Keep pypdf default,
 Docling explicit with review warnings, and original milestone pending. Continue
 safe Markdown/context/other-format work. No further tuning under this request.
 
-### 3. Parent context, disabled by default
-
-- Add `SPECTRO_RAG_PARENT_EXPANSION=false`. Disabled path retains existing selection and budgeting behavior.
-- Attach context to its retrieved child using optional typed `context_blocks` containing text, block identity, exact locations and review metadata. Existing evidence fields remain valid; missing collections default to empty lists.
-- Parents/context receive no independent retrieval score or evidence count. Never count child and parent as separate corroborating sources.
-- With expansion enabled, reserve **30% of existing retrieval byte budget before child selection**. Rank/rerank children normally; bypass premature per-query byte truncation, then select children within remaining 70% and existing child-count limit.
-- Allocate reserved capacity in child-rank order. Attach full section when it fits; otherwise construct contiguous source-block window around child, growing outward by block distance, preceding block first on ties.
-- Preserve whole blocks and table header/row associations. Do not cross document or validated section boundaries. Deduplicate shared context blocks; retain each block's review status and precise locations.
-- If no complete surrounding block fits, record omission. Reuse unused capacity for additional ranked children only after expansion allocation.
-- Charge serialized context against retrieval and provider budgets. Final provider fitting drops complete optional context blocks before children; never silently slices source text.
-- Verify context against pinned stored blocks before assessment. Permit quotations only from verified child/context text and bind quotations to exact contributing locations.
-- Show attached context in diagnostics/UI and exports without presenting another independent source. Existing reports without context retain their current rendering.
-
-**Acceptance:** reservation, windows, ordering, deduplication, provenance validation, count limits, byte limits and provider fitting pass. Expansion remains disabled after software acceptance.
-
 ### 4. Scientific-context regression and AFS usefulness gate
 
 - Add offline end-to-end tests through ingestion → retrieval → prompt construction → mocked assessment → validation → exports.

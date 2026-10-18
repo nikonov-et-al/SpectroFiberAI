@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from spectro_ai.evidence import EvidenceRetriever
+from spectro_ai.evidence import EvidenceRetriever, canonical_context_block
 from spectro_ai.guardrails import (
     abstention_report,
     missing_fields,
@@ -699,7 +699,7 @@ class OllamaTechnicalAssessor:
     def fit_evidence(
         self, use_case: CustomerUseCase, evidence: list[RetrievedEvidence]
     ) -> tuple[list[RetrievedEvidence], list[str]]:
-        """Drop lowest-ranked whole excerpts until complete request fits the budget."""
+        """Drop optional context blocks before lower-ranked child excerpts."""
         retained = list(evidence)
         dropped: list[str] = []
         while retained:
@@ -710,7 +710,23 @@ class OllamaTechnicalAssessor:
                 <= self.settings.context
             ):
                 return retained, dropped
-            dropped.append(retained.pop().evidence_id)
+            context_index = next(
+                (
+                    index
+                    for index in range(len(retained) - 1, -1, -1)
+                    if retained[index].context_blocks
+                ),
+                None,
+            )
+            if context_index is not None:
+                item = retained[context_index]
+                block = item.context_blocks[-1]
+                dropped.append(f"context:{item.evidence_id}:{block.block_id}")
+                retained[context_index] = item.model_copy(
+                    update={"context_blocks": item.context_blocks[:-1]}
+                )
+            else:
+                dropped.append(retained.pop().evidence_id)
         return [], dropped
 
     @staticmethod
@@ -726,8 +742,9 @@ class OllamaTechnicalAssessor:
             },
             "unknown_fields": missing_fields(use_case),
         }
-        sources = [
-            {
+        sources = []
+        for item in evidence:
+            source = {
                 "evidence_id": item.evidence_id,
                 "source_id": item.source_id,
                 "document_version": item.document_version,
@@ -736,8 +753,12 @@ class OllamaTechnicalAssessor:
                 "review_status": item.review_status,
                 "source_scope": item.source_scope,
             }
-            for item in evidence
-        ]
+            if item.context_blocks:
+                source["context_relation"] = "same source context; not independent evidence"
+                source["context_blocks"] = [
+                    block.model_dump(mode="json") for block in item.context_blocks
+                ]
+            sources.append(source)
         return [
             {"role": "system", "content": _assessment_prompt()},
             {
@@ -850,8 +871,10 @@ def _verified_retrieval(
     for chunk in index["chunks"]:
         for provenance in chunk["provenance"]:
             by_id[provenance["evidence_id"]] = (chunk["text"], provenance)
+    sections = {item["section_id"]: item for item in index.get("sections", [])}
     verified = []
     seen = set()
+    seen_context_blocks: set[str] = set()
     for item in evidence:
         actual = by_id.get(item.evidence_id)
         if not actual or item.evidence_id in seen:
@@ -877,6 +900,35 @@ def _verified_retrieval(
         )
         if expected != supplied:
             raise ProviderError("Retrieved evidence metadata does not match the validated index")
+        provenance_locations = provenance.get("source_locations", [])
+        supplied_locations = [
+            location.model_dump(mode="json") for location in item.source_locations
+        ]
+        if supplied_locations and supplied_locations != provenance_locations:
+            raise ProviderError("Retrieved evidence locations do not match the validated index")
+        child_section = provenance.get("section_id")
+        child_document = provenance.get("document_id") or (sections.get(child_section) or {}).get(
+            "document_id"
+        )
+        for context in item.context_blocks:
+            try:
+                canonical = canonical_context_block(index, context.block_id)
+            except ValueError as exc:
+                raise ProviderError(
+                    "Retrieved context block is absent from the validated index"
+                ) from exc
+            if (
+                context.block_id in seen_context_blocks
+                or context.document_id != child_document
+                or context.section_id != child_section
+                or context.source_id != provenance["source_id"]
+                or context.document_version != provenance["document_version"]
+                or context.model_dump(mode="json") != canonical.model_dump(mode="json")
+            ):
+                raise ProviderError(
+                    "Retrieved context block does not match the validated child source section"
+                )
+            seen_context_blocks.add(context.block_id)
         seen.add(item.evidence_id)
         if "technical" in item.source_scope.casefold() and not any(
             marker in item.source_scope.casefold()
@@ -898,11 +950,27 @@ def _evidence_set_version(evidence: list[RetrievedEvidence], manifest_version: s
                 "excerpt": sha256(item.excerpt.encode("utf-8")).hexdigest(),
                 "review_status": item.review_status,
                 "scope": item.source_scope,
+                **(
+                    {"context": [block.model_dump(mode="json") for block in item.context_blocks]}
+                    if item.context_blocks
+                    else {}
+                ),
             }
             for item in sorted(evidence, key=lambda row: row.evidence_id)
         ],
     }
     return sha256(json.dumps(version_material, sort_keys=True).encode()).hexdigest()
+
+
+def _budget_drop_warning(dropped: list[str]) -> str:
+    contexts = [item for item in dropped if item.startswith("context:")]
+    children = [item for item in dropped if not item.startswith("context:")]
+    parts = []
+    if contexts:
+        parts.append(f"{len(contexts)} whole optional context blocks ({', '.join(contexts)})")
+    if children:
+        parts.append(f"{len(children)} lower-ranked whole excerpts ({', '.join(children)})")
+    return "Dropped " + " and ".join(parts) + " to preserve the complete request context budget."
 
 
 def _supports_candidate(
@@ -953,7 +1021,11 @@ def _supports_candidate(
     def has_phrase(text: str, phrase: str) -> bool:
         return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
 
-    excerpt = " ".join(item.excerpt for item in cited).casefold()
+    excerpt = " ".join(
+        text
+        for item in cited
+        for text in (item.excerpt, *(block.text for block in item.context_blocks))
+    ).casefold()
     has_all_method_components = all(
         any(has_phrase(excerpt, alias) for alias in component) for component in components
     )
@@ -1205,20 +1277,14 @@ def assess_use_case(
                 knowledge_index_revision=index_revision,
                 retrieval_diagnostics=retrieval_diagnostics,
             )
-            report.assessment_warnings.append(
-                f"Dropped {len(dropped_ids)} whole excerpts to preserve complete "
-                f"source text: {', '.join(dropped_ids)}."
-            )
+            report.assessment_warnings.append(_budget_drop_warning(dropped_ids))
             return report
         draft = selected_assessor.assess(use_case, retrieved)
         known = {item.evidence_id: item for item in retrieved}
         candidates: list[TechniqueCandidate] = []
         warnings = []
         if dropped_ids:
-            warnings.append(
-                f"Dropped {len(dropped_ids)} lower-ranked whole excerpts for context "
-                f"budget: {', '.join(dropped_ids)}."
-            )
+            warnings.append(_budget_drop_warning(dropped_ids))
         warnings.append(
             "Candidate relevance check is lexical screening only; it cannot validate "
             "entailment or scientific suitability. Expert review required."
@@ -1244,8 +1310,19 @@ def assess_use_case(
             valid_ids: list[str] = []
             for claim in proposed.evidence_claims:
                 excerpt = known.get(claim.evidence_id)
+                context_quote = None
+                if claim.context_block_id is not None and excerpt is not None:
+                    context_quote = next(
+                        (
+                            block
+                            for block in excerpt.context_blocks
+                            if block.block_id == claim.context_block_id
+                        ),
+                        None,
+                    )
                 if (
-                    excerpt is not None
+                    claim.context_block_id is None
+                    and excerpt is not None
                     and claim.quote
                     and claim.quote not in excerpt.excerpt
                     and claim_searches < 4
@@ -1261,21 +1338,77 @@ def assess_use_case(
                                 query,
                                 limit=4,
                             )
-                            verified_extra, _ = _verified_retrieval(source, additional)
-                            exact_match = next(
-                                (item for item in verified_extra if claim.quote in item.excerpt),
+                            matching_extra = next(
+                                (item for item in additional if claim.quote in item.excerpt),
                                 None,
                             )
+                            verified_extra, _ = (
+                                _verified_retrieval(source, [matching_extra])
+                                if matching_extra is not None
+                                else ([], "")
+                            )
+                            exact_match = verified_extra[0] if verified_extra else None
                             if exact_match is not None:
+                                already_attached = {
+                                    block.block_id
+                                    for item in retrieved
+                                    for block in item.context_blocks
+                                }
+                                exact_match = exact_match.model_copy(
+                                    update={
+                                        "context_blocks": [
+                                            block
+                                            for block in exact_match.context_blocks
+                                            if block.block_id not in already_attached
+                                        ]
+                                    }
+                                )
                                 if exact_match.evidence_id not in known:
-                                    retrieved.append(exact_match)
-                                    known[exact_match.evidence_id] = exact_match
-                                    version = _evidence_set_version(
-                                        retrieved,
-                                        str(initial_metadata["manifest_version"]),
+                                    previous = retrieved
+                                    candidate_set = [*previous, exact_match]
+                                    fitted = candidate_set
+                                    extra_dropped: list[str] = []
+                                    if fit_evidence is not None:
+                                        fitted, extra_dropped = fit_evidence(
+                                            use_case, candidate_set
+                                        )
+                                    preserved = len(fitted) >= len(previous) and all(
+                                        old.model_dump(mode="json") == new.model_dump(mode="json")
+                                        for old, new in zip(previous, fitted, strict=False)
                                     )
-                                if exact_match.evidence_id not in citations:
+                                    retained_extra = any(
+                                        item.evidence_id == exact_match.evidence_id
+                                        for item in fitted
+                                    )
+                                    if preserved and retained_extra:
+                                        retrieved = fitted
+                                        dropped_ids.extend(extra_dropped)
+                                        if extra_dropped:
+                                            warnings.append(_budget_drop_warning(extra_dropped))
+                                        known = {item.evidence_id: item for item in retrieved}
+                                        version = _evidence_set_version(
+                                            retrieved,
+                                            str(initial_metadata["manifest_version"]),
+                                        )
+                                    else:
+                                        warnings.append(
+                                            "Claim-specific evidence was not added because "
+                                            "it could not fit without changing earlier verified "
+                                            "evidence or dropping the new excerpt."
+                                        )
+                                        exact_match = None
+                                else:
+                                    exact_match = known[exact_match.evidence_id]
+                                if exact_match is None:
+                                    continue
+                                exact_match = known.get(exact_match.evidence_id)
+                                if (
+                                    exact_match is not None
+                                    and exact_match.evidence_id not in citations
+                                ):
                                     citations.append(exact_match.evidence_id)
+                                if exact_match is None:
+                                    continue
                                 claim = claim.model_copy(
                                     update={"evidence_id": exact_match.evidence_id}
                                 )
@@ -1292,13 +1425,18 @@ def assess_use_case(
                     claim.evidence_id in citations
                     and excerpt is not None
                     and claim.quote
-                    and claim.quote in excerpt.excerpt
+                    and (
+                        claim.quote in excerpt.excerpt
+                        if claim.context_block_id is None
+                        else context_quote is not None and claim.quote in context_quote.text
+                    )
                 ):
                     valid_claims.append(
                         EvidenceClaim(
                             claim=f"Source states: “{claim.quote}”",
                             evidence_id=claim.evidence_id,
                             quote=claim.quote,
+                            context_block_id=claim.context_block_id,
                         )
                     )
                     if claim.evidence_id not in valid_ids:
@@ -1346,9 +1484,13 @@ def assess_use_case(
             positive_sources = {item.source_id for item in supporting}
             conflict = next(
                 (
-                    item
+                    (item, block_id)
                     for item in retrieved
-                    if item.source_id not in positive_sources
+                    for block_id, text in (
+                        [(None, item.excerpt)]
+                        + [(block.block_id, block.text) for block in item.context_blocks]
+                    )
+                    if (item.source_id not in positive_sources or block_id is not None)
                     and any(
                         negative.search(sentence)
                         and _candidate_method_named(proposed, sentence)
@@ -1360,16 +1502,21 @@ def assess_use_case(
                             re.search(rf"\b{re.escape(term)}\b", sentence, re.I)
                             for term in matrix_terms
                         )
-                        for sentence in re.split(r"(?<=[.!?])\s+", item.excerpt)
+                        for sentence in re.split(r"(?<=[.!?])\s+", text)
                     )
                 ),
                 None,
             )
             if conflict:
+                conflict_item, context_block_id = conflict
+                location = (
+                    f" context block {context_block_id}" if context_block_id is not None else ""
+                )
                 conflict_found = True
                 warnings.append(
                     f"Withheld {proposed.spectroscopy_method}: direct conflicting technical "
-                    f"statement found in {conflict.evidence_id}; expert resolution required."
+                    f"statement found in {conflict_item.evidence_id}{location}; "
+                    "expert resolution required."
                 )
                 rejected += 1
                 relevance_rejected = True
@@ -1386,7 +1533,11 @@ def assess_use_case(
             candidate_data["required_assumptions"] = [
                 "Transferability to customer samples and operating conditions is unknown."
             ]
-            source_text = " ".join(item.excerpt.casefold() for item in supporting)
+            source_text = " ".join(
+                text.casefold()
+                for item in supporting
+                for text in (item.excerpt, *(block.text for block in item.context_blocks))
+            )
             for field in ("measurement_geometry", "proposed_spectral_region"):
                 value = candidate_data[field]
                 if value and value.casefold() not in source_text:

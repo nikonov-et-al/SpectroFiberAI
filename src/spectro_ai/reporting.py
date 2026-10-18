@@ -15,6 +15,23 @@ def _bullets(values: list[str]) -> list[str]:
     return [f"- {_safe(value)}" for value in values] or ["- None recorded."]
 
 
+def _location_text(locations: list) -> str:
+    return ", ".join(location.locator for location in locations) or "location unavailable"
+
+
+def _context_lines(item, *, indent: str = "  ") -> list[str]:
+    lines = []
+    for block in item.context_blocks:
+        lines += [
+            f"{indent}- Same-source context · block `{html.escape(block.block_id, quote=False)}` · "
+            f"{_safe(_location_text(block.source_locations))} · "
+            f"scope: {_safe(block.source_scope)} · review: {_safe(block.review_status)} · "
+            f"version: {_safe(block.document_version)}",
+            f"{indent}  > {_safe(block.text)}",
+        ]
+    return lines
+
+
 def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = False) -> str:
     """Render the customer report; technical detail is explicitly opt-in."""
     if not include_diagnostics:
@@ -110,8 +127,24 @@ def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = Fal
             source = evidence_by_id.get(claim.evidence_id)
             source_label = f"{claim.evidence_id}"
             if source:
-                page = f" {source.page_or_section}" if source.page_or_section else ""
+                context = next(
+                    (
+                        block
+                        for block in source.context_blocks
+                        if block.block_id == claim.context_block_id
+                    ),
+                    None,
+                )
+                page = (
+                    f" {_location_text(context.source_locations)}"
+                    if context
+                    else f" {source.page_or_section}"
+                    if source.page_or_section
+                    else ""
+                )
                 source_label = f"{source.source_id}{page} · {claim.evidence_id}"
+                if context:
+                    source_label += f" · context block {context.block_id}"
             lines += [
                 f"- Claim: {_safe(claim.claim)} · source: "
                 f"`{html.escape(source_label, quote=False)}`",
@@ -127,6 +160,9 @@ def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = Fal
                     f"version: {_safe(item.document_version or 'unspecified')}"
                 )
                 lines.append(f"  > {_safe(item.excerpt)}")
+                lines.extend(_context_lines(item))
+                if item.context_omissions:
+                    lines.append("  - Context omitted: " + _safe("; ".join(item.context_omissions)))
         for evidence in candidate.supporting_evidence:
             entry = f"- [{evidence.kind}] {_safe(evidence.statement)}"
             if evidence.source_url:
@@ -212,15 +248,40 @@ def _customer_markdown(report: AssessmentReport) -> str:
         for claim in candidate.evidence_claims:
             source = sources.get(claim.evidence_id)
             if source:
-                # Chunk identifiers and extraction metadata belong in diagnostics.
-                page = re.sub(r"\s*\(chunk[^)]*\)", "", source.page_or_section or "")
+                context = next(
+                    (
+                        block
+                        for block in source.context_blocks
+                        if block.block_id == claim.context_block_id
+                    ),
+                    None,
+                )
+                page = (
+                    _location_text(context.source_locations)
+                    if context
+                    else re.sub(r"\s*\(chunk[^)]*\)", "", source.page_or_section or "")
+                )
                 lines += [
                     f"Source: {_safe(source.source_id)} {_safe(page)} · "
                     f"document version {_safe(source.document_version or 'unspecified')}",
+                    *(
+                        [f"Context block: `{html.escape(context.block_id, quote=False)}`"]
+                        if context
+                        else []
+                    ),
                     "",
                     f"> {_safe(claim.quote)}",
                     "",
                 ]
+    if any(item.context_blocks for item in report.retrieved_evidence):
+        lines += ["## Retrieved source context", ""]
+        for item in report.retrieved_evidence:
+            lines.append(
+                f"- {item.source_id} {item.page_or_section or ''} · "
+                f"`{html.escape(item.evidence_id, quote=False)}` · attached context; "
+                "not independent corroboration"
+            )
+            lines.extend(_context_lines(item))
     plan = report.proposed_feasibility_experiment
     lines += ["## Proposed feasibility experiment", ""]
     for field in type(plan).model_fields:

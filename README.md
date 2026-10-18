@@ -188,6 +188,29 @@ also needs validation; invalid nesting uses flat page-local sections. Do not
 treat extracted specifications as approved. See
 [source-review findings](docs/STRUCTURE_CONTEXT_REVIEW.md).
 
+Parent expansion is disabled by default. To try it after an explicit knowledge
+base update, set `SPECTRO_RAG_PARENT_EXPANSION=true`; set it to `false` to retain
+existing child-only selection. Expansion reserves 30% of retrieval byte capacity
+before choosing children, then attaches complete source blocks from the same
+validated section. Oversized sections use source-order windows; unsafe hierarchy
+suppresses expansion. Unused reserve can admit more ranked children.
+
+Context stays nested under its child evidence and never counts as another
+corroborating source. Quoting a context block requires its exact block ID and
+source locations. Retrieval charges serialized UTF-8 context; provider fitting
+drops whole optional context blocks before children. Diagnostics show omissions.
+Real AFS usefulness and any default-promotion decision remain pending.
+
+Run a comparison on an explicitly prepared index without generation requests:
+
+```powershell
+uv run python scripts/review_structure_context.py --index .cache/rag/index.sqlite3 --output .cache/structure-context/review.json
+```
+
+This pins one snapshot, compares BM25 expansion off/on, and records source hashes,
+child/context locations, context volume and warm latency. Relevance metrics remain
+unset: agent inspection is not human-reviewed retrieval labeling.
+
 ### Optional local reranker (English trial)
 
 Default retrieval is unchanged. To try CPU cross-encoder reranking, install the
