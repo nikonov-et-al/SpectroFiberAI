@@ -3,7 +3,6 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from spectro_ai.baseline import extract_use_case
 from spectro_ai.intake import EDITABLE_FIELDS
 from spectro_ai.models import CustomerUseCase
 from spectro_ai.providers import (
@@ -18,16 +17,6 @@ from spectro_ai.providers import (
 def model_reply(**fields: object) -> dict:
     payload = CustomerUseCase(**fields).model_dump(mode="json")
     return {"message": {"content": json.dumps(payload)}}
-
-
-def test_offline_extractor_keeps_literal_quotes_and_unknowns() -> None:
-    text = "We measure moisture in food powder."
-    case = extract_use_case(text)
-    assert case.field_quotes["measurement_objective"] == "measure moisture"
-    assert case.field_quotes["sample_matrix"] == "food powder"
-    assert case.temperature is None
-    assert case.extraction_mode == "offline"
-    assert case.request_id == extract_use_case(text).request_id
 
 
 @pytest.mark.parametrize(
@@ -226,7 +215,7 @@ def test_extraction_context_reserves_configured_output_budget(
     assert case.sample_matrix == "water"
 
 
-def test_timeout_is_reported_without_silent_offline_fallback(
+def test_timeout_is_reported_without_provider_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def timed_out(*args: object, **kwargs: object) -> None:
@@ -238,7 +227,7 @@ def test_timeout_is_reported_without_silent_offline_fallback(
         OllamaUseCaseExtractor(ExtractionSettings()).extract("We measure moisture in flour.")
 
 
-def test_ollama_provider_failure_has_visible_offline_fallback(
+def test_ollama_provider_failure_has_no_automatic_provider_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -246,9 +235,8 @@ def test_ollama_provider_failure_has_visible_offline_fallback(
         lambda *args, **kwargs: (_ for _ in ()).throw(ProviderError("local model unavailable")),
     )
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
-    report = assess_problem("We measure moisture in flour.")
-    assert report.extracted_requirements.extraction_mode == "offline"
-    assert "Ollama extraction unavailable" in report.extracted_requirements.extraction_warnings[0]
+    with pytest.raises(ProviderError, match="local model unavailable"):
+        assess_problem("We measure moisture in flour.")
 
 
 def test_injection_is_untrusted_and_unquoted_facts_do_not_survive(
@@ -278,19 +266,16 @@ def test_injection_is_untrusted_and_unquoted_facts_do_not_survive(
     assert case.extraction_mode == "ollama"
 
 
-def test_report_labels_fallback_mode_and_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_report_does_not_fabricate_fallback_after_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "spectro_ai.providers.ollama_request",
         lambda *args, **kwargs: (_ for _ in ()).throw(ProviderError("offline")),
     )
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
-    markdown = assess_problem("We measure moisture in flour.")
-    from spectro_ai.reporting import render_markdown
-
-    output = render_markdown(markdown)
-    assert "Extraction mode: **offline**" in output
-    assert "Limited deterministic fallback" in output
-    assert "Ollama extraction unavailable" in output
+    with pytest.raises(ProviderError):
+        assess_problem("We measure moisture in flour.")
 
 
 def test_request_service_uses_injected_extractor_and_reports_mode(

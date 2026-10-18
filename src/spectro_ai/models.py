@@ -109,7 +109,7 @@ class CustomerUseCase(DomainModel):
     unknown_or_missing_information: list[str] = Field(default_factory=list)
     ambiguities: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
-    extraction_mode: Literal["offline", "ollama"] = "offline"
+    extraction_mode: Literal["ollama", "openai"] = "ollama"
     extraction_warnings: list[str] = Field(default_factory=list)
 
 
@@ -142,6 +142,12 @@ class TechniqueKnowledge(DomainModel):
     expert_review_required: Literal[True] = True
 
 
+class EvidenceClaim(DomainModel):
+    claim: str
+    evidence_id: str
+    quote: str
+
+
 class TechniqueCandidate(DomainModel):
     spectroscopy_method: str
     proposed_spectral_region: str | None = None
@@ -152,6 +158,7 @@ class TechniqueCandidate(DomainModel):
     required_assumptions: list[str] = Field(default_factory=list)
     supporting_evidence: list[Evidence] = Field(default_factory=list)
     supporting_evidence_ids: list[str] = Field(default_factory=list)
+    evidence_claims: list[EvidenceClaim] = Field(default_factory=list)
     preliminary_suitability_assessment: Literal["provisional_candidate", "undetermined"] = (
         "undetermined"
     )
@@ -184,6 +191,13 @@ class RetrievedEvidence(DomainModel):
     source_scope: str | None = None
 
 
+class ValidationDiagnostic(DomainModel):
+    level: Literal["error", "warning", "not_checked"]
+    check: str
+    message: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class AssessmentReport(DomainModel):
     extracted_requirements: CustomerUseCase
     missing_information: list[str] = Field(default_factory=list)
@@ -192,18 +206,13 @@ class AssessmentReport(DomainModel):
     recommendation_rationale: str | None = None
     proposed_feasibility_experiment: FeasibilityPlan
     assumptions_and_uncertainties: list[str] = Field(default_factory=list)
-    status: Literal[
-        "insufficient_information",
-        "provisional_candidates",
-        "no_rule_match",
-        "provisional",
-        "outside_supported_scope",
-    ]
-    assessment_method: Literal[
-        "deterministic_baseline", "ollama_grounded", "offline_fallback", "evidence_abstention"
-    ] = "deterministic_baseline"
-    assessment_provider: Literal["baseline", "ollama"] | None = "baseline"
+    status: Literal["insufficient_information", "provisional", "outside_supported_scope"]
+    assessment_method: Literal["ollama_grounded", "openai_grounded", "evidence_abstention"] = (
+        "evidence_abstention"
+    )
+    assessment_provider: Literal["ollama", "openai"] | None = None
     evidence_set_version: str | None = None
     retrieved_evidence: list[RetrievedEvidence] = Field(default_factory=list)
-    report_version: str = "baseline-v1"
+    report_version: str = "grounded-v1"
     assessment_warnings: list[str] = Field(default_factory=list)
+    validation_diagnostics: list[ValidationDiagnostic] = Field(default_factory=list)

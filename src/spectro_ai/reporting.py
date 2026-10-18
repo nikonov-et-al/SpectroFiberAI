@@ -21,14 +21,9 @@ def render_markdown(report: AssessmentReport) -> str:
         "# Spectroscopy assessment",
         "",
         (
-            "**Local evidence-grounded assessment; provisional and expert review required.**"
-            if report.assessment_method == "ollama_grounded"
-            else "**Limited deterministic fallback; no grounded assessment was completed.**"
-            if report.assessment_method == "offline_fallback"
-            else "**Assessment abstained because source evidence was insufficient.**"
+            "**Assessment abstained because source evidence or required facts were insufficient.**"
             if report.assessment_method == "evidence_abstention"
-            else "**Offline literal extraction and deterministic assessment. "
-            "Expert review required.**"
+            else "**LLM-generated assessment with deterministic checks; expert review required.**"
         ),
         "",
         f"Assessment method: **{_safe(report.assessment_method)}** · provider "
@@ -58,6 +53,15 @@ def render_markdown(report: AssessmentReport) -> str:
     )
     lines += ["", "## Extraction warnings", ""] + _bullets(case.extraction_warnings)
     lines += ["", "## Assessment warnings", ""] + _bullets(report.assessment_warnings)
+    diagnostics = getattr(report, "validation_diagnostics", [])
+    if diagnostics:
+        lines += ["", "## Deterministic validation", ""]
+        for item in diagnostics:
+            references = f" · evidence: {', '.join(item.evidence_ids)}" if item.evidence_ids else ""
+            lines.append(
+                f"- **{_safe(item.level)} · {_safe(item.check)}:** "
+                f"{_safe(item.message)}{_safe(references)}"
+            )
     lines += ["", "## Original customer text", ""]
     source = case.source_text or "No input supplied."
     # A longer fence safely contains arbitrary customer backticks.
@@ -65,7 +69,8 @@ def render_markdown(report: AssessmentReport) -> str:
     lines += [fence + "text", source, fence]
     lines += ["", "## Missing information", ""] + _bullets(report.missing_information)
     lines += ["", "## Follow-up questions", ""] + _bullets(report.suggested_technical_questions)
-    lines += ["", "## Preliminary candidates", "", _safe(report.recommendation_rationale), ""]
+    rationale = report.recommendation_rationale or "No recommendation is made."
+    lines += ["", "## Preliminary candidates", "", _safe(rationale), ""]
     evidence_by_id = {item.evidence_id: item for item in report.retrieved_evidence}
     for candidate in report.candidate_techniques:
         lines += [
@@ -73,14 +78,14 @@ def render_markdown(report: AssessmentReport) -> str:
             "",
             f"Suitability: {_safe(candidate.preliminary_suitability_assessment)}",
             "",
-            f"Rule: {_safe(candidate.rule_rationale)}",
-            "",
             f"Spectral region: {_safe(candidate.proposed_spectral_region or 'Undetermined')}",
             "",
             f"Geometry: {_safe(candidate.measurement_geometry or 'Undetermined')}",
             "",
             f"Probe: {_safe(candidate.potential_probe_configuration or 'Undetermined')}",
         ]
+        if candidate.rule_rationale:
+            lines += ["", f"Rationale: {_safe(candidate.rule_rationale)}"]
         for heading, values in (
             ("Potential advantages", candidate.advantages),
             ("Limitations and sample considerations", candidate.limitations),
@@ -88,13 +93,25 @@ def render_markdown(report: AssessmentReport) -> str:
         ):
             lines += ["", f"**{heading}**", ""] + _bullets(values)
         lines += ["", "**Supporting evidence and provenance**", ""]
+        for claim in candidate.evidence_claims:
+            source = evidence_by_id.get(claim.evidence_id)
+            source_label = f"{claim.evidence_id}"
+            if source:
+                page = f" {source.page_or_section}" if source.page_or_section else ""
+                source_label = f"{source.source_id}{page} · {claim.evidence_id}"
+            lines += [
+                f"- Claim: {_safe(claim.claim)} · source: "
+                f"`{html.escape(source_label, quote=False)}`",
+                f"  > {_safe(claim.quote)}",
+            ]
         for evidence_id in candidate.supporting_evidence_ids:
             item = evidence_by_id.get(evidence_id)
             if item:
                 page = f" {item.page_or_section}" if item.page_or_section else ""
                 lines.append(
                     f"- {item.source_id}{page} · `{html.escape(item.evidence_id, quote=False)}` · "
-                    f"scope: {_safe(item.source_scope)} · review: {_safe(item.review_status)}"
+                    f"scope: {_safe(item.source_scope)} · review: {_safe(item.review_status)} · "
+                    f"version: {_safe(item.document_version or 'unspecified')}"
                 )
                 lines.append(f"  > {_safe(item.excerpt)}")
         for evidence in candidate.supporting_evidence:
@@ -109,7 +126,8 @@ def render_markdown(report: AssessmentReport) -> str:
             page = f" {item.page_or_section}" if item.page_or_section else ""
             lines += [
                 f"- {item.source_id}{page} · `{html.escape(item.evidence_id, quote=False)}` · "
-                f"scope: {_safe(item.source_scope)} · review: {_safe(item.review_status)}",
+                f"scope: {_safe(item.source_scope)} · review: {_safe(item.review_status)} · "
+                f"version: {_safe(item.document_version or 'unspecified')}",
                 f"  > {_safe(item.excerpt)}",
             ]
     plan = report.proposed_feasibility_experiment

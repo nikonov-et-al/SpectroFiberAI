@@ -3,9 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from spectro_ai.baseline import assess
 from spectro_ai.knowledge import KnowledgeSource, YamlKnowledgeSource, default_knowledge_path
-from spectro_ai.models import CustomerUseCase
 
 
 def test_starter_knowledge_covers_all_five_techniques() -> None:
@@ -38,17 +36,3 @@ def test_missing_file_and_duplicate_ids_fail(tmp_path: Path) -> None:
     duplicate.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="Technique IDs must be unique"):
         YamlKnowledgeSource(duplicate).get_techniques()
-
-
-def test_custom_source_boundary_and_absent_rule_knowledge() -> None:
-    class EmptySource:
-        def get_techniques(self) -> list:
-            return []
-
-    case = CustomerUseCase(
-        measurement_objective="measure moisture",
-        target_analyte_or_property="moisture",
-        sample_matrix="flour",
-    )
-    with pytest.raises(ValueError, match="rule-required technique: nir"):
-        assess(case, EmptySource())

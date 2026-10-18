@@ -1,9 +1,7 @@
 import json
 
 import pytest
-from streamlit.testing.v1 import AppTest
 
-from spectro_ai.baseline import assess
 from spectro_ai.intake import correct_requirements
 from spectro_ai.models import (
     AssessmentReport,
@@ -94,10 +92,25 @@ def draft(*, evidence_ids: list[str] | None = None, method: str = "NIR") -> _Tec
         candidate_techniques=[
             {
                 "spectroscopy_method": method,
-                "measurement_geometry": "Compare a reflection study on representative samples.",
-                "advantages": ["Source reports a related application."],
-                "limitations": ["This does not establish performance for the customer matrix."],
+                "measurement_geometry": None,
+                "advantages": [
+                    "NIR diffuse reflection can measure protein in opaque milk samples."
+                ],
+                "limitations": [
+                    "NIR diffuse reflection can measure protein in opaque milk samples."
+                ],
                 "supporting_evidence_ids": evidence_ids or ["S01-p17"],
+                "evidence_claims": [
+                    {
+                        "claim": (
+                            "NIR diffuse reflection can measure protein in opaque milk samples."
+                        ),
+                        "evidence_id": "S01-p17",
+                        "quote": (
+                            "NIR diffuse reflection can measure protein in opaque milk samples."
+                        ),
+                    }
+                ],
                 "preliminary_suitability_assessment": "provisional_candidate",
             }
         ],
@@ -144,9 +157,7 @@ def test_grounded_assessment_binds_candidate_to_validated_excerpt(
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
     source = FakeRetriever()
     assessor = FakeAssessor()
-    report = assess_use_case(
-        case(), retriever=source, assessor=assessor, allow_offline_fallback=False
-    )
+    report = assess_use_case(case(), retriever=source, assessor=assessor)
     assert report.status == "provisional"
     assert report.assessment_method == "ollama_grounded"
     assert report.assessment_provider == "ollama"
@@ -171,7 +182,6 @@ def test_unknown_or_unrelated_candidate_evidence_is_removed(
         case(),
         retriever=FakeRetriever(),
         assessor=FakeAssessor(draft(evidence_ids=["made-up-id"])),
-        allow_offline_fallback=False,
     )
     assert report.candidate_techniques == []
     assert report.status == "insufficient_information"
@@ -182,11 +192,9 @@ def test_unknown_or_unrelated_candidate_evidence_is_removed(
     unrelated = FakeRetriever(
         evidence(excerpt="NIR spectroscopy measures concentration changes in mineral samples.")
     )
-    report = assess_use_case(
-        case(), retriever=unrelated, assessor=FakeAssessor(), allow_offline_fallback=False
-    )
+    report = assess_use_case(case(), retriever=unrelated, assessor=FakeAssessor())
     assert report.candidate_techniques == []
-    assert any("lexically support" in warning for warning in report.assessment_warnings)
+    assert any("Removed NIR" in warning for warning in report.assessment_warnings)
 
 
 def test_combined_method_requires_lexical_support_for_each_component() -> None:
@@ -208,7 +216,7 @@ def test_context_fit_keeps_multiple_whole_excerpts_with_output_reserve() -> None
     ]
     assessor = OllamaTechnicalAssessor(ExtractionSettings())
     retained, dropped = assessor.fit_evidence(case(), excerpts)
-    assert len(retained) >= 5
+    assert len(retained) >= 3
     assert len(retained) + len(dropped) == len(excerpts)
     assert [item.evidence_id for item in retained] == [
         item.evidence_id for item in excerpts[: len(retained)]
@@ -218,9 +226,7 @@ def test_context_fit_keeps_multiple_whole_excerpts_with_output_reserve() -> None
 def test_business_only_sources_cannot_support_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
     business = FakeRetriever(evidence(scope="business_context"))
-    report = assess_use_case(
-        case(), retriever=business, assessor=FakeAssessor(), allow_offline_fallback=False
-    )
+    report = assess_use_case(case(), retriever=business, assessor=FakeAssessor())
     assert report.candidate_techniques == []
     assert report.status == "outside_supported_scope"
     assert report.assessment_method == "evidence_abstention"
@@ -236,14 +242,12 @@ def test_empty_retrieval_abstains_instead_of_using_baseline_candidates(
             self.item = None
             self.searched = []
 
-    report = assess_use_case(
-        case(), retriever=EmptyRetriever(), assessor=FakeAssessor(), allow_offline_fallback=False
-    )
+    report = assess_use_case(case(), retriever=EmptyRetriever(), assessor=FakeAssessor())
     assert report.candidate_techniques == []
     assert report.status == "outside_supported_scope"
 
 
-def test_provider_failure_keeps_expert_corrected_case_and_warns(
+def test_provider_failure_does_not_switch_to_offline_recommendations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
@@ -255,22 +259,11 @@ def test_provider_failure_keeps_expert_corrected_case_and_warns(
             raise ProviderError("model timed out")
 
     corrected = correct_requirements(case(), {"target_analyte_or_property": "casein"})
-    report = assess_use_case(
-        corrected,
-        retriever=FakeRetriever(),
-        assessor=FailingAssessor(),
-        allow_offline_fallback=True,
-    )
-    assert report.assessment_method == "offline_fallback"
-    assert report.assessment_provider == "baseline"
-    assert report.extracted_requirements.target_analyte_or_property == "casein"
-    assert any("model timed out" in warning for warning in report.assessment_warnings)
     with pytest.raises(ProviderError, match="Grounded assessment failed"):
         assess_use_case(
             corrected,
             retriever=FakeRetriever(),
             assessor=FailingAssessor(),
-            allow_offline_fallback=False,
         )
 
 
@@ -281,9 +274,7 @@ def test_retrieval_and_assessor_both_receive_corrected_case(
     corrected = correct_requirements(case(), {"target_analyte_or_property": "casein"})
     source = FakeRetriever(evidence(excerpt="NIR can measure casein in milk samples."))
     assessor = FakeAssessor(draft())
-    report = assess_use_case(
-        corrected, retriever=source, assessor=assessor, allow_offline_fallback=False
-    )
+    report = assess_use_case(corrected, retriever=source, assessor=assessor)
     assert source.searched[0].target_analyte_or_property == "casein"
     assert assessor.seen[0].target_analyte_or_property == "casein"
     assert report.extracted_requirements.target_analyte_or_property == "casein"
@@ -304,7 +295,6 @@ def test_assessment_refreshes_missing_fields_after_expert_correction(
         corrected,
         retriever=FakeRetriever(),
         assessor=FakeAssessor(draft()),
-        allow_offline_fallback=False,
     )
     assert "target_analyte_or_property" not in report.missing_information
     assert (
@@ -329,14 +319,13 @@ def test_grounded_plan_replaces_invented_thresholds_and_requires_heldout_review(
         case(),
         retriever=FakeRetriever(),
         assessor=FakeAssessor(generated),
-        allow_offline_fallback=False,
     )
     plan = report.proposed_feasibility_experiment
     assert plan.success_criteria == [
         "Customer-defined acceptance criteria are TBD and must be agreed before testing."
     ]
     assert "0.90" not in " ".join(plan.evaluation_metrics)
-    assert "no method is assumed to be best" in plan.hypothesis
+    assert "no result is assumed" in plan.hypothesis
     assert any("held-out" in step for step in plan.experimental_steps)
     assert "Select production hardware." not in plan.success_actions
     assert any(
@@ -347,7 +336,6 @@ def test_grounded_plan_replaces_invented_thresholds_and_requires_heldout_review(
         stated,
         retriever=FakeRetriever(),
         assessor=FakeAssessor(draft()),
-        allow_offline_fallback=False,
     )
     assert stated_report.proposed_feasibility_experiment.success_criteria == [
         "within ±0.2% per customer protocol"
@@ -370,7 +358,6 @@ def test_assessor_cannot_replace_trusted_customer_facts(monkeypatch: pytest.Monk
         original,
         retriever=FakeRetriever(),
         assessor=TamperingAssessor(),
-        allow_offline_fallback=False,
     )
     assert report.extracted_requirements.target_analyte_or_property == "protein"
 
@@ -443,9 +430,7 @@ def test_export_contains_source_page_excerpt_scope_review_and_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
-    report = assess_use_case(
-        case(), retriever=FakeRetriever(), assessor=FakeAssessor(), allow_offline_fallback=False
-    )
+    report = assess_use_case(case(), retriever=FakeRetriever(), assessor=FakeAssessor())
     from spectro_ai.reporting import render_markdown
 
     markdown = render_markdown(report)
@@ -454,27 +439,3 @@ def test_export_contains_source_page_excerpt_scope_review_and_warning(
     assert "technical\\_reference; technical" in markdown
     assert "needs\\_page\\_review" in markdown
     assert "report grounded-ollama-v1" in markdown
-
-
-def test_expert_correction_button_reassesses_through_same_service(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("SPECTRO_AI_PROVIDER", "baseline")
-    calls: list[CustomerUseCase] = []
-
-    def corrected_assessment(use_case: CustomerUseCase) -> AssessmentReport:
-        calls.append(use_case)
-        return assess(use_case)
-
-    monkeypatch.setattr("spectro_ai.providers.assess_use_case", corrected_assessment)
-    from pathlib import Path
-
-    app = AppTest.from_file(
-        Path(__file__).resolve().parents[1] / "app.py", default_timeout=15
-    ).run()
-    app.text_area[0].input("We measure moisture in flour.").run()
-    app.button[0].click().run()
-    app.text_input[2].input("moisture and oil").run()
-    app.button[1].click().run()
-    assert not app.exception
-    assert calls and calls[-1].target_analyte_or_property == "moisture and oil"

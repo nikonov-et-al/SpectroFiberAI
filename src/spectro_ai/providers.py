@@ -1,4 +1,4 @@
-"""Explicit provider selection; the baseline never imports an LLM SDK."""
+"""LLM provider adapters and grounded assessment orchestration."""
 
 import json
 import os
@@ -13,22 +13,18 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from spectro_ai.baseline import (
-    OfflineUseCaseExtractor,
-    UseCaseExtractor,
-    assess,
-    missing_fields,
-    prioritized_questions,
-)
 from spectro_ai.evidence import EvidenceRetriever
+from spectro_ai.guardrails import abstention_report, missing_fields, prioritized_questions
 from spectro_ai.models import (
     CUSTOMER_FACT_FIELDS,
     AssessmentReport,
     CustomerUseCase,
     Evidence,
+    EvidenceClaim,
     FeasibilityPlan,
     RetrievedEvidence,
     TechniqueCandidate,
+    ValidationDiagnostic,
 )
 from spectro_ai.rag_models import DocumentAnswer
 
@@ -67,18 +63,21 @@ class RagSettings:
 
 @dataclass(frozen=True)
 class ExtractionSettings:
+    provider: str = "ollama"
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "gemma4:12b-it-q4_K_M"
+    openai_base_url: str = "https://api.openai.com/v1"
     context: int = 16384
-    timeout: int = 120
-    output_tokens: int = 2048
+    timeout: int = 240
+    output_tokens: int = 4096
 
     @classmethod
     def from_env(cls) -> ExtractionSettings:
         try:
+            provider = os.getenv("SPECTRO_AI_PROVIDER", "ollama").strip().lower()
             context = int(os.getenv("SPECTRO_AI_CONTEXT", "16384"))
-            timeout = int(os.getenv("SPECTRO_AI_TIMEOUT", "120"))
-            output_tokens = int(os.getenv("SPECTRO_AI_OUTPUT_TOKENS", "2048"))
+            timeout = int(os.getenv("SPECTRO_AI_TIMEOUT", "240"))
+            output_tokens = int(os.getenv("SPECTRO_AI_OUTPUT_TOKENS", "4096"))
         except ValueError:
             raise ProviderError(
                 "SPECTRO_AI_CONTEXT, SPECTRO_AI_TIMEOUT and SPECTRO_AI_OUTPUT_TOKENS "
@@ -89,9 +88,22 @@ class ExtractionSettings:
                 "SPECTRO_AI_CONTEXT must be at least 4096, timeout positive, "
                 "and SPECTRO_AI_OUTPUT_TOKENS at least 128"
             )
+        if provider not in {"ollama", "openai"}:
+            raise ProviderError(
+                f"Unsupported SPECTRO_AI_PROVIDER {provider!r}; use ollama or openai."
+            )
+        model = (
+            os.getenv("OPENAI_MODEL", "")
+            if provider == "openai"
+            else os.getenv("OLLAMA_MODEL", cls.model)
+        )
+        if provider == "openai" and (not model or not os.getenv("OPENAI_API_KEY")):
+            raise ProviderError("Set OPENAI_MODEL and OPENAI_API_KEY for OpenAI assessment.")
         return cls(
+            provider=provider,
             ollama_url=os.getenv("OLLAMA_BASE_URL", cls.ollama_url).rstrip("/"),
-            model=os.getenv("OLLAMA_MODEL", cls.model),
+            model=model,
+            openai_base_url=os.getenv("OPENAI_BASE_URL", cls.openai_base_url).rstrip("/"),
             context=context,
             timeout=timeout,
             output_tokens=output_tokens,
@@ -185,10 +197,29 @@ def _extraction_schema() -> dict:
             },
         }
     )
-    return {"type": "object", "properties": properties, "additionalProperties": False}
+    return _strict_schema({"type": "object", "properties": properties})
 
 
-def _clean_extraction(payload: str, customer_text: str) -> CustomerUseCase:
+def _strict_schema(schema: dict) -> dict:
+    """OpenAI strict JSON schema requires every object property to be required."""
+
+    def visit(value: object) -> object:
+        if isinstance(value, dict):
+            result = {key: visit(item) for key, item in value.items()}
+            if result.get("type") == "object":
+                result["additionalProperties"] = False
+                result["required"] = list(result.get("properties", {}))
+            return result
+        if isinstance(value, list):
+            return [visit(item) for item in value]
+        return value
+
+    return visit(schema)  # type: ignore[return-value]
+
+
+def _clean_extraction(
+    payload: str, customer_text: str, provider: str = "ollama"
+) -> CustomerUseCase:
     parsed = CustomerUseCase.model_validate_json(payload)
     values = parsed.model_dump()
     values["source_text"] = customer_text or None
@@ -257,11 +288,51 @@ def _clean_extraction(payload: str, customer_text: str) -> CustomerUseCase:
         if field in valid_quotes or any(key.startswith(f"{field}_") for key in valid_quotes)
     }
     values["unknown_or_missing_information"] = []
-    values["extraction_mode"] = "ollama"
+    values["extraction_mode"] = provider
     values["extraction_warnings"] = warnings
     cleaned = CustomerUseCase.model_validate(values)
     cleaned.unknown_or_missing_information = missing_fields(cleaned)
     return cleaned
+
+
+def _openai_json(settings: ExtractionSettings, messages: list[dict], schema: dict) -> str:
+    if not settings.model or not os.getenv("OPENAI_API_KEY"):
+        raise ProviderError("Set OPENAI_MODEL and OPENAI_API_KEY for OpenAI assessment.")
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ProviderError("Install OpenAI support with `uv sync --extra llm`.") from None
+    try:
+        with OpenAI(
+            api_key=os.environ["OPENAI_API_KEY"],
+            base_url=settings.openai_base_url,
+            timeout=settings.timeout,
+            max_retries=0,
+        ) as client:
+            response = client.chat.completions.create(
+                model=settings.model,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "spectro_ai_output",
+                        "strict": True,
+                        "schema": _strict_schema(schema),
+                    },
+                },
+                max_completion_tokens=settings.output_tokens,
+            )
+    except Exception:
+        raise ProviderError(
+            "OpenAI request failed. Check endpoint, model, credentials, timeout, "
+            "and structured-output support."
+        ) from None
+    choice = response.choices[0] if response.choices else None
+    if choice is None or choice.message.refusal:
+        raise ProviderError("OpenAI refused the request; no output was produced.")
+    if choice.finish_reason != "stop":
+        raise ProviderError("OpenAI output was incomplete; increase output budget or reduce input.")
+    return choice.message.content or ""
 
 
 class OllamaUseCaseExtractor:
@@ -271,6 +342,8 @@ class OllamaUseCaseExtractor:
         self.settings = settings or ExtractionSettings.from_env()
 
     def extract(self, customer_text: str) -> CustomerUseCase:
+        if self.settings.provider == "openai":
+            return OpenAIUseCaseExtractor(self.settings).extract(customer_text)
         system = _extraction_prompt()
         reserved_context = self.settings.output_tokens + 256
         if len((system + customer_text).encode("utf-8")) + reserved_context > self.settings.context:
@@ -312,11 +385,50 @@ class OllamaUseCaseExtractor:
                     continue
                 raise ProviderError("Ollama returned invalid extraction output")
             try:
-                return _clean_extraction(message["content"], customer_text)
+                return _clean_extraction(message["content"], customer_text, "ollama")
             except ValueError, TypeError:
                 if attempt == 1:
                     raise ProviderError("Ollama returned invalid customer-use-case JSON") from None
         raise ProviderError("Ollama extraction failed after one structural retry")
+
+
+class OpenAIUseCaseExtractor:
+    """OpenAI structured extraction; output passes through shared literal-quote checks."""
+
+    def __init__(self, settings: ExtractionSettings | None = None) -> None:
+        self.settings = settings or ExtractionSettings.from_env()
+
+    def extract(self, customer_text: str) -> CustomerUseCase:
+        settings = self.settings
+        system = _extraction_prompt()
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": customer_text},
+        ]
+        for attempt in range(2):
+            if (
+                len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
+                + settings.output_tokens
+                + 256
+                > settings.context
+            ):
+                kind = "retry" if attempt else "input"
+                raise ProviderError(
+                    f"Extraction {kind} exceeds the configured context budget. "
+                    "Increase SPECTRO_AI_CONTEXT or shorten the complete customer text."
+                )
+            raw = _openai_json(settings, messages, _extraction_schema())
+            try:
+                return _clean_extraction(raw, customer_text, "openai")
+            except ValidationError, ValueError, TypeError:
+                if attempt:
+                    raise ProviderError("OpenAI returned invalid customer-use-case JSON.") from None
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": "Return one JSON object matching schema."},
+                ]
+        raise ProviderError("OpenAI extraction failed after one structural retry.")
 
 
 def embedding_identity(settings: RagSettings) -> str:
@@ -417,6 +529,10 @@ class _CandidateDraft(TechniqueCandidate):
         description="Name each specific method; combined methods list every component."
     )
     supporting_evidence: list[Evidence] = Field(default_factory=list, max_length=0)
+    evidence_claims: list[EvidenceClaim] = Field(
+        default_factory=list,
+        description="One exact source quotation linked to each advantage and limitation claim.",
+    )
 
 
 class _TechnicalDraft(BaseModel):
@@ -457,6 +573,10 @@ class TechnicalAssessor(Protocol):
     ) -> AssessmentReport: ...
 
 
+class UseCaseExtractor(Protocol):
+    def extract(self, customer_text: str) -> CustomerUseCase: ...
+
+
 def _technical_schema() -> dict:
     """Compact transport schema; Pydantic still validates omitted empty source fields."""
     schema = _TechnicalDraft.model_json_schema()
@@ -478,7 +598,7 @@ def _technical_schema() -> dict:
     candidate_schema = definitions.get("_CandidateDraft", {})
     candidate_schema.get("properties", {}).pop("supporting_evidence", None)
     definitions.pop("Evidence", None)
-    return compact
+    return _strict_schema(compact)
 
 
 def _assessment_prompt() -> str:
@@ -603,16 +723,19 @@ class OllamaTechnicalAssessor:
                         "Assessment retry exceeds the configured context budget. Increase "
                         "SPECTRO_AI_CONTEXT or reduce retrieved evidence."
                     )
-            result = ollama_request(
-                self.settings, "/api/chat", payload, timeout=self.settings.timeout
-            )
-            if result.get("done_reason") == "length":
-                raise ProviderError(
-                    "Assessment exceeded SPECTRO_AI_OUTPUT_TOKENS. Increase that setting "
-                    "or request a shorter assessment."
+            if self.settings.provider == "openai":
+                content = _openai_json(self.settings, messages, _technical_schema())
+            else:
+                result = ollama_request(
+                    self.settings, "/api/chat", payload, timeout=self.settings.timeout
                 )
-            message = result.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
+                if result.get("done_reason") == "length":
+                    raise ProviderError(
+                        "Assessment exceeded SPECTRO_AI_OUTPUT_TOKENS. Increase that setting "
+                        "or request a shorter assessment."
+                    )
+                message = result.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
             try:
                 if not isinstance(content, str):
                     raise ValueError("missing JSON response")
@@ -631,9 +754,13 @@ class OllamaTechnicalAssessor:
                     proposed_feasibility_experiment=parsed.proposed_feasibility_experiment,
                     assumptions_and_uncertainties=parsed.assumptions_and_uncertainties,
                     status=parsed.status,
-                    assessment_method="ollama_grounded",
-                    assessment_provider="ollama",
-                    report_version="grounded-ollama-v1",
+                    assessment_method=(
+                        "openai_grounded"
+                        if self.settings.provider == "openai"
+                        else "ollama_grounded"
+                    ),
+                    assessment_provider=self.settings.provider,
+                    report_version=f"grounded-{self.settings.provider}-v1",
                 )
             except ValidationError, ValueError, TypeError:
                 if attempt:
@@ -765,84 +892,104 @@ def _abstention_report(
     reason: str,
     *,
     status: Literal["insufficient_information", "outside_supported_scope"],
-    method: Literal["offline_fallback", "evidence_abstention"],
+    method: Literal["evidence_abstention"] = "evidence_abstention",
+    provider: str | None = None,
     evidence: list[RetrievedEvidence] | None = None,
     evidence_version: str | None = None,
 ) -> AssessmentReport:
-    report = assess(use_case)
-    report.candidate_techniques = []
-    report.status = status
-    report.recommendation_rationale = reason
-    report.proposed_feasibility_experiment = FeasibilityPlan(
-        objective="Resolve requirements and source support before choosing a technique.",
-        experimental_steps=[
-            "Confirm the customer target, matrix, operating conditions, and decision need.",
-            "Ask a spectroscopy expert to review relevant primary sources and select "
-            "a study only if supported.",
-        ],
-        expected_limitations=[
-            "No method or customer-specific performance is established by this assessment."
-        ],
-        success_criteria=["A source-supported study and customer-defined criteria are agreed."],
-        success_actions=["Proceed to a controlled feasibility study after expert review."],
-        failure_actions=["Gather relevant evidence or retain the abstention."],
+    report = abstention_report(
+        use_case,
+        reason,
+        status=status,
+        provider=provider,
+        evidence=evidence,
+        evidence_version=evidence_version,
     )
     report.assessment_method = method
-    report.assessment_provider = "baseline" if method == "offline_fallback" else "ollama"
-    report.report_version = (
-        "offline-fallback-v1" if method == "offline_fallback" else "grounded-abstention-v1"
-    )
-    report.retrieved_evidence = evidence or []
-    report.evidence_set_version = evidence_version
-    report.assessment_warnings = [reason]
     return report
 
 
 def _apply_feasibility_safeguards(
     use_case: CustomerUseCase, plan: FeasibilityPlan
 ) -> tuple[FeasibilityPlan, list[str]]:
-    """Keep generated study plans exploratory and customer-criteria bound."""
+    """Keep qualitative LLM planning while replacing risky thresholds and configuration."""
     safe = plan.model_copy(deep=True)
+    safe.objective = "Explore whether a source-supported candidate merits a controlled study."
+    safe.hypothesis = (
+        "Test whether and which retained candidate distinguishes the target on representative, "
+        "independent held-out samples; no result is assumed."
+    )
     stated_criteria = [
         value
         for value in (use_case.required_accuracy, use_case.detection_limit)
         if value and value.strip()
     ] + [value for value in use_case.strict_requirements if value.strip()]
-    safe.hypothesis = (
-        "Test whether and which source-supported candidate meets customer-defined "
-        "needs on independent held-out samples; no method is assumed to be best."
-    )
     safe.success_criteria = (
         stated_criteria
         if stated_criteria
         else ["Customer-defined acceptance criteria are TBD and must be agreed before testing."]
     )
     safe.evaluation_metrics = [
-        "Compare held-out results with independent reference measurements using "
-        "customer-agreed analysis measures; no threshold is assumed."
+        "Compare held-out results with independent references using customer-agreed measures."
     ]
+    unsafe_configuration = bool(
+        safe.proposed_configuration
+        and re.search(
+            r"\d|customer.{0,20}(?:has|uses|existing|installed|configured)",
+            safe.proposed_configuration,
+            re.I,
+        )
+    )
+    if unsafe_configuration:
+        safe.proposed_configuration = None
+    if safe.proposed_measurement_technique and re.search(
+        r"\d", safe.proposed_measurement_technique
+    ):
+        safe.proposed_measurement_technique = None
+    stated_values = [
+        getattr(use_case, field) for field in CUSTOMER_FACT_FIELDS
+    ] + use_case.strict_requirements
+    numeric_spec = re.compile(
+        r"(?<![\w])[-+]?\d+(?:[.,]\d+)?\s*(?:%|(?:°?[A-Za-zµμ]+(?:/[A-Za-zµμ]+)?))?"
+    )
+
+    def is_customer_quantity(quantity: str) -> bool:
+        return any(
+            re.search(rf"(?<![\w]){re.escape(quantity.strip())}(?![\w])", value)
+            for value in stated_values
+            if isinstance(value, str)
+        )
+
+    rejected_numeric_steps = 0
+    filtered_steps = []
+    for step in safe.experimental_steps:
+        quantities = numeric_spec.findall(step)
+        if any(not is_customer_quantity(quantity) for quantity in quantities):
+            rejected_numeric_steps += 1
+            continue
+        filtered_steps.append(step)
+    safe.experimental_steps = filtered_steps
+    if not any(
+        "held-out" in step.casefold() or "holdout" in step.casefold()
+        for step in safe.experimental_steps
+    ):
+        safe.experimental_steps.append(
+            "Reserve independent samples or process runs for held-out evaluation."
+        )
+    if not any("reference" in step.casefold() for step in safe.experimental_steps):
+        safe.experimental_steps.append(
+            "Compare measurements with independent reference values on the same samples."
+        )
     if not safe.reference_measurement:
         safe.reference_measurement = (
             use_case.reference_measurement
-            or "Independent reference measurement to be agreed with the customer before testing."
-        )
-    if not any(
-        "held-out" in step.lower() or "holdout" in step.lower() for step in safe.experimental_steps
-    ):
-        safe.experimental_steps.append(
-            "Reserve independent sample batches or process runs for held-out validation."
-        )
-    if not any("reference" in step.lower() for step in safe.experimental_steps):
-        safe.experimental_steps.append(
-            "Compare each candidate with independent reference measurements on the same samples."
+            or "Independent reference measurement to be agreed before testing."
         )
     safe.success_actions = [
-        "Review held-out feasibility results with the customer and domain experts "
-        "before deciding next steps."
+        "Review study results with customer and domain experts before deciding next steps."
     ]
     safe.failure_actions = [
-        "If customer-defined criteria are not met, investigate sample and process "
-        "effects, then revise or stop the feasibility study."
+        "Investigate study limitations, then revise or stop the feasibility study."
     ]
     caveat = (
         "Source demonstrations do not establish customer or instrument performance; "
@@ -851,13 +998,22 @@ def _apply_feasibility_safeguards(
     if caveat not in safe.expected_limitations:
         safe.expected_limitations.append(caveat)
     warnings = [
-        "Deterministic engineering-planning safeguards set the hypothesis, metrics, "
-        "criteria, and next-step actions; these process guardrails are not scientific validation."
+        "Deterministic safeguards replaced acceptance thresholds and constrained study planning; "
+        "they are not scientific validation."
     ]
     if not stated_criteria:
         warnings.append(
             "No customer-defined acceptance criteria were supplied; results remain "
             "exploratory until criteria are agreed."
+        )
+    if rejected_numeric_steps:
+        warnings.append(
+            f"Removed {rejected_numeric_steps} experimental step(s) containing numeric quantities "
+            "that did not exactly match a structured customer fact."
+        )
+    if unsafe_configuration:
+        warnings.append(
+            "Removed numerical or asserted customer configuration; compatibility remains unchecked."
         )
     return safe, warnings
 
@@ -867,18 +1023,28 @@ def assess_use_case(
     *,
     assessor: TechnicalAssessor | None = None,
     retriever: EvidenceRetriever | None = None,
-    allow_offline_fallback: bool = True,
 ) -> AssessmentReport:
     """Assess an existing extracted/corrected case through current provider policy."""
     use_case = use_case.model_copy(deep=True)
     use_case.unknown_or_missing_information = missing_fields(use_case)
-    provider = os.getenv("SPECTRO_AI_PROVIDER", "baseline").strip().lower()
+    provider = os.getenv("SPECTRO_AI_PROVIDER", "ollama").strip().lower()
     if provider == "baseline":
-        return assess(use_case)
-    if provider == "openai":
-        raise ProviderError("OpenAI assessment is not implemented. No request was sent.")
+        raise ProviderError("The baseline provider was removed. Use ollama or openai.")
     if provider != "ollama":
-        raise ProviderError(f"Unsupported provider {provider!r}. Use baseline or ollama.")
+        if provider != "openai":
+            raise ProviderError(f"Unsupported provider {provider!r}. Use ollama or openai.")
+    if not (
+        use_case.measurement_objective
+        and use_case.target_analyte_or_property
+        and use_case.sample_matrix
+    ):
+        return _abstention_report(
+            use_case,
+            "Objective, target, or sample matrix is missing; candidate selection "
+            "is insufficiently specified.",
+            status="insufficient_information",
+            provider=provider,
+        )
     try:
         source = retriever or EvidenceRetriever()
         retrieved, version = _verified_retrieval(source, source.search(use_case, limit=8))
@@ -889,20 +1055,7 @@ def assess_use_case(
                 "outside currently supported evidence.",
                 status="outside_supported_scope",
                 method="evidence_abstention",
-                evidence_version=version,
-            )
-        if not (
-            use_case.measurement_objective
-            and use_case.target_analyte_or_property
-            and use_case.sample_matrix
-        ):
-            return _abstention_report(
-                use_case,
-                "Objective, target, or sample matrix is missing; candidate selection "
-                "is insufficiently specified.",
-                status="insufficient_information",
-                method="evidence_abstention",
-                evidence=retrieved,
+                provider=provider,
                 evidence_version=version,
             )
         selected_assessor = assessor or OllamaTechnicalAssessor()
@@ -920,6 +1073,7 @@ def assess_use_case(
                 "context budget; assessment abstained.",
                 status="insufficient_information",
                 method="evidence_abstention",
+                provider=provider,
                 evidence_version=version,
             )
             report.assessment_warnings.append(
@@ -959,6 +1113,51 @@ def assess_use_case(
                 )
                 rejected += 1
                 continue
+            claim_map = {claim.claim: claim for claim in proposed.evidence_claims}
+            bullets = proposed.advantages + proposed.limitations
+            if (
+                not proposed.limitations
+                or not bullets
+                or any(item not in claim_map for item in bullets)
+            ):
+                warnings.append(
+                    f"Removed {proposed.spectroscopy_method}: every advantage and "
+                    "limitation needs a linked evidence claim."
+                )
+                rejected += 1
+                continue
+            if proposed.potential_probe_configuration and re.search(
+                r"\d|customer.{0,20}(?:has|uses|existing|installed|configured)|"
+                r"is installed|is configured",
+                proposed.potential_probe_configuration,
+                flags=re.IGNORECASE,
+            ):
+                warnings.append(
+                    f"Removed {proposed.spectroscopy_method}: source optics cannot "
+                    "establish precise customer hardware configuration."
+                )
+                rejected += 1
+                continue
+            invalid_claim = False
+            for bullet in bullets:
+                claim = claim_map[bullet]
+                excerpt = known.get(claim.evidence_id)
+                if (
+                    claim.evidence_id not in citations
+                    or excerpt is None
+                    or not claim.quote
+                    or claim.quote not in excerpt.excerpt
+                    or claim.claim != claim.quote
+                ):
+                    invalid_claim = True
+                    break
+            if invalid_claim:
+                warnings.append(
+                    f"Removed {proposed.spectroscopy_method}: claim quotation "
+                    "did not exactly match cited excerpt."
+                )
+                rejected += 1
+                continue
             if not _supports_candidate(use_case, proposed, supporting):
                 warnings.append(
                     f"Removed {proposed.spectroscopy_method}: retrieved excerpts did "
@@ -967,11 +1166,54 @@ def assess_use_case(
                 rejected += 1
                 relevance_rejected = True
                 continue
+            source_text = " ".join(item.excerpt.casefold() for item in supporting)
+            if (
+                proposed.measurement_geometry
+                and proposed.measurement_geometry.casefold() not in source_text
+            ):
+                warnings.append(
+                    f"Removed {proposed.spectroscopy_method}: geometry wording "
+                    "is not quoted in cited evidence."
+                )
+                rejected += 1
+                continue
+            if (
+                proposed.proposed_spectral_region
+                and proposed.proposed_spectral_region.casefold() not in source_text
+            ):
+                warnings.append(
+                    f"Removed {proposed.spectroscopy_method}: spectral region "
+                    "wording is not quoted in cited evidence."
+                )
+                rejected += 1
+                continue
             candidate_data = proposed.model_dump()
             candidate_data["supporting_evidence"] = []
             candidate_data["supporting_evidence_ids"] = citations
+            candidate_data["rule_rationale"] = None
+            if candidate_data["measurement_geometry"]:
+                candidate_data["measurement_geometry"] = (
+                    "Study candidate only: " + candidate_data["measurement_geometry"]
+                )
             candidates.append(TechniqueCandidate(**candidate_data))
-        if not candidates:
+        if draft.status != "provisional":
+            status = draft.status
+            candidates = []
+            rationale = draft.recommendation_rationale or "LLM abstained; no candidate retained."
+            plan = _abstention_report(
+                use_case,
+                rationale,
+                status=(
+                    "outside_supported_scope"
+                    if status == "outside_supported_scope"
+                    else "insufficient_information"
+                ),
+                method="evidence_abstention",
+                provider=provider,
+                evidence=retrieved,
+                evidence_version=version,
+            ).proposed_feasibility_experiment
+        elif not candidates:
             status = (
                 "outside_supported_scope"
                 if draft.status == "outside_supported_scope" or relevance_rejected
@@ -1015,6 +1257,41 @@ def assess_use_case(
                 )
         plan, plan_warnings = _apply_feasibility_safeguards(use_case, plan)
         warnings.extend(plan_warnings)
+        diagnostics = [
+            ValidationDiagnostic(
+                level="not_checked",
+                check="scientific_entailment",
+                message=(
+                    "Quote membership and lexical screening do not validate scientific "
+                    "entailment, customer suitability, or compatibility; expert review required."
+                ),
+                evidence_ids=[item.evidence_id for item in retrieved],
+            ),
+            ValidationDiagnostic(
+                level="not_checked",
+                check="units_and_compatibility",
+                message=(
+                    "Customer units were preserved without conversion. Instrument, fiber, "
+                    "temperature, pressure, and material compatibility were not checked."
+                ),
+            ),
+        ]
+        if use_case.contradictions:
+            diagnostics.append(
+                ValidationDiagnostic(
+                    level="warning",
+                    check="customer_constraints",
+                    message="Contradictory customer statements require expert resolution.",
+                )
+            )
+        if warnings:
+            diagnostics.append(
+                ValidationDiagnostic(
+                    level="warning",
+                    check="assessment_guardrails",
+                    message="; ".join(warnings),
+                )
+            )
         return AssessmentReport(
             extracted_requirements=use_case,
             missing_information=missing_fields(use_case),
@@ -1026,65 +1303,25 @@ def assess_use_case(
             proposed_feasibility_experiment=plan,
             assumptions_and_uncertainties=draft.assumptions_and_uncertainties,
             status=status,
-            assessment_method="ollama_grounded",
-            assessment_provider="ollama",
+            assessment_method=f"{provider}_grounded",
+            assessment_provider=provider,
             evidence_set_version=version,
             retrieved_evidence=retrieved,
-            report_version="grounded-ollama-v1",
+            report_version=f"grounded-{provider}-v1",
             assessment_warnings=warnings,
+            validation_diagnostics=diagnostics,
         )
     except (ProviderError, ValueError) as exc:
-        if not allow_offline_fallback:
-            raise ProviderError(f"Grounded assessment failed: {exc}") from None
-        report = assess(use_case)
-        report.assessment_method = "offline_fallback"
-        report.assessment_provider = "baseline"
-        report.report_version = "offline-fallback-v1"
-        report.assessment_warnings.append(
-            f"Grounded assessment unavailable; deterministic baseline used ({exc})."
-        )
-        return report
+        raise ProviderError(f"Grounded assessment failed: {exc}") from None
 
 
 def assess_problem(
     text: str,
     extractor: UseCaseExtractor | None = None,
-    *,
-    allow_offline_fallback: bool = True,
 ) -> AssessmentReport:
-    provider = os.getenv("SPECTRO_AI_PROVIDER", "baseline").strip().lower()
+    provider = os.getenv("SPECTRO_AI_PROVIDER", "ollama").strip().lower()
     if provider == "baseline":
-        selected = extractor or OfflineUseCaseExtractor()
-        return assess(selected.extract(text))
-    if provider == "ollama":
-        try:
-            selected = extractor or OllamaUseCaseExtractor()
-            return assess_use_case(
-                selected.extract(text), allow_offline_fallback=allow_offline_fallback
-            )
-        except ProviderError as exc:
-            if extractor is not None or not allow_offline_fallback:
-                raise
-            case = OfflineUseCaseExtractor().extract(text)
-            case.extraction_mode = "offline"
-            case.extraction_warnings.append(
-                f"Ollama extraction unavailable; conservative offline extraction used ({exc})."
-            )
-            report = assess(case)
-            report.assessment_method = "offline_fallback"
-            report.assessment_provider = "baseline"
-            report.report_version = "offline-fallback-v1"
-            report.assessment_warnings.append(
-                "Grounded technical assessment was not run for offline-extracted facts."
-            )
-            return report
-    if provider == "openai":
-        configured = bool(os.getenv("OPENAI_MODEL")) and bool(os.getenv("OPENAI_API_KEY"))
-        detail = "Configuration present." if configured else "OPENAI_MODEL/API key not configured."
-        raise ProviderError(
-            f"OpenAI adapter is not implemented. {detail} "
-            "No request was sent. Set SPECTRO_AI_PROVIDER=baseline for the offline demo."
-        )
-    raise ProviderError(
-        f"Unsupported provider {provider!r}. Use SPECTRO_AI_PROVIDER=baseline or ollama."
-    )
+        raise ProviderError("The baseline provider was removed. Use ollama or openai.")
+    if provider not in {"ollama", "openai"}:
+        raise ProviderError(f"Unsupported provider {provider!r}. Use ollama or openai.")
+    return assess_use_case((extractor or OllamaUseCaseExtractor()).extract(text))
