@@ -81,16 +81,6 @@ uv run python scripts/smoke_check.py
 
 Tests use injected provider doubles and do not require API credentials or network access. Live evaluations do require a configured provider and prepared knowledge index; see [evaluation instructions](docs/EVALUATION.md) and the latest [LLM evaluation report](docs/LLM_EVALUATION.md). The current scientific review and unresolved gates are documented in the [assessment review](docs/ASSESSMENT_REVIEW.md).
 
-## Project status and documentation
-
-This repository targets the SchubKI hackathon spectroscopy use case. Challenge requirements, hardware capabilities, measured customer data, and achievable performance remain unconfirmed. Experimental retrieval modes and model assessments are not established quality improvements.
-
-- [Demo runbook](docs/DEMO_PLAN.md)
-- [Evaluation results](docs/EVALUATION_RESULTS.md)
-- [Scientific evidence assessment](docs/EVIDENCE_ASSESSMENT.md)
-- [Challenge facts and open questions](docs/CHALLENGE.md)
-- [Repository guide](docs/REPOSITORY_GUIDE.md)
-
 ## License
 
 See [LICENSE](LICENSE).
