@@ -40,7 +40,7 @@ def _assessment_config() -> tuple[str, str, tuple[str, ...]]:
         os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         os.getenv("OPENAI_BASE_URL", ""),
         key_fingerprint,
-        os.getenv("SPECTRO_AI_CONTEXT", "16384"),
+        os.getenv("SPECTRO_AI_CONTEXT", "131072"),
         os.getenv("SPECTRO_AI_TIMEOUT", "240"),
         os.getenv("SPECTRO_AI_OUTPUT_TOKENS", "4096"),
     )
