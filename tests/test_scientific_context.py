@@ -5,16 +5,26 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from test_assessment import assess_use_case
 
 from spectro_ai.evidence import EvidenceRetriever
-from spectro_ai.models import CustomerUseCase, EvidenceClaim, FeasibilityPlan, SourceLocation
+from spectro_ai.models import (
+    ApplicationSupportAssessment,
+    CustomerUseCase,
+    EvidenceAssessment,
+    EvidenceClaim,
+    EvidenceConditionComparison,
+    EvidenceObservation,
+    EvidenceReference,
+    FeasibilityPlan,
+    SourceLocation,
+)
 from spectro_ai.providers import (
     ExtractionSettings,
     OllamaTechnicalAssessor,
     RagSettings,
     _TechnicalDraft,
     _verified_retrieval,
-    assess_use_case,
 )
 from spectro_ai.reporting import render_markdown
 
@@ -106,6 +116,65 @@ def _case() -> CustomerUseCase:
     )
 
 
+def _pdf_evidence_assessment(customer, evidence, *, allow_retry=True):
+    del customer, allow_retry
+    item = evidence[0]
+    positive = item.excerpt
+    reference = EvidenceReference(evidence_id=item.evidence_id, quote=positive)
+    comparisons = [
+        EvidenceConditionComparison(
+            dimension=dimension,
+            source_value=value,
+            customer_fields=[field],
+            comparison="match",
+            rationale="The selected source excerpt explicitly names this condition.",
+            supporting_references=[reference],
+        )
+        for dimension, field, value in (
+            ("target_property", "target_analyte_or_property", "protein"),
+            ("matrix_state", "sample_matrix", "milk"),
+        )
+        if value in positive.casefold()
+    ]
+    row = next(block for block in item.context_blocks if _VALUE_QUOTE in block.text)
+    row_reference = EvidenceReference(
+        evidence_id=item.evidence_id,
+        quote=_VALUE_QUOTE,
+        context_block_id=row.block_id,
+    )
+    observation = EvidenceObservation(
+        observation_id="selected-page-capability",
+        scenario_id="selected-page-application",
+        source_statement=positive,
+        references=[reference, row_reference],
+        statement_kind="proposed_capability",
+        method="NIR diffuse reflection",
+        condition_comparisons=comparisons,
+        entailment="supported",
+        applicability="direct_application" if comparisons else "general_method",
+    )
+    return EvidenceAssessment(
+        observations=[observation],
+        support_assessments=[
+            ApplicationSupportAssessment(
+                support_assessment_id="selected-page-support",
+                method="NIR diffuse reflection",
+                basis="application_supported" if comparisons else "unsupported",
+                observation_ids=[observation.observation_id],
+                bounded_conclusion=(
+                    "The source describes NIR diffuse reflection for the stated milk "
+                    "protein application."
+                ),
+                rejection_reason=None
+                if comparisons
+                else "The excerpt lacks explicit case overlap.",
+            )
+        ],
+        input_fingerprint="fixture",
+        assessor_version="fixture",
+    )
+
+
 class _FixedChildRetriever:
     def __init__(self, retriever, child):
         self.retriever = retriever
@@ -188,6 +257,7 @@ def test_repeated_pdf_value_stays_bound_to_the_selected_page_and_block(repeated_
         case,
         retriever=_FixedChildRetriever(retriever, child),
         assessor=report_assessor,
+        evidence_assessor=_pdf_evidence_assessment,
     )
     assert len(report.candidate_techniques) == 1
     value_claim = next(
@@ -200,7 +270,7 @@ def test_repeated_pdf_value_stays_bound_to_the_selected_page_and_block(repeated_
     exported_row = next(
         block
         for block in json_report["retrieved_evidence"][0]["context_blocks"]
-        if block["block_id"] == value_claim.context_block_id
+        if block["block_id"] == row.block_id
     )
     assert exported_row["source_locations"][0]["page_number"] == 1
     assert exported_row["source_locations"][0]["document_version"] == child.document_version
@@ -227,16 +297,16 @@ def test_repeated_pdf_value_stays_bound_to_the_selected_page_and_block(repeated_
         case,
         retriever=_FixedChildRetriever(retriever, child),
         assessor=wrong_page_assessor,
+        evidence_assessor=_pdf_evidence_assessment,
     )
     assert len(wrong_page_report.candidate_techniques) == 1
-    assert all(
-        claim.quote != _VALUE_QUOTE
+    wrong_page_value_claim = next(
+        claim
         for claim in wrong_page_report.candidate_techniques[0].evidence_claims
+        if claim.quote == _VALUE_QUOTE
     )
-    assert any(
-        "Removed unsupported or invalidly cited claims" in warning
-        for warning in wrong_page_report.assessment_warnings
-    )
+    assert wrong_page_value_claim.context_block_id == row.block_id
+    assert wrong_page_value_claim.context_block_id != page_two["block_id"]
 
     tampered = child.model_copy(
         update={

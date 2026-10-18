@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from spectro_ai.models import CustomerUseCase, RetrievedEvidence
+from spectro_ai.models import CustomerUseCase, EvidenceAssessment, RetrievedEvidence
 from spectro_ai.providers import (
     ExtractionSettings,
     OllamaTechnicalAssessor,
@@ -145,7 +145,14 @@ def test_openai_assessment_uses_shared_domain_output_and_metadata(monkeypatch):
     )
     report = OllamaTechnicalAssessor(
         ExtractionSettings(provider="openai", model="gpt-test")
-    ).assess(use_case, [evidence])
+    ).assess(
+        use_case,
+        [evidence],
+        evidence_assessment=EvidenceAssessment(
+            input_fingerprint="adapter-test",
+            assessor_version="adapter-test",
+        ),
+    )
     assert report.assessment_provider == "openai"
     assert report.assessment_method == "openai_grounded"
     assert (

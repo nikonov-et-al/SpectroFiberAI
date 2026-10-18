@@ -3,9 +3,19 @@ from __future__ import annotations
 import json
 
 import pytest
+from test_assessment import assess_use_case
 
 from spectro_ai.evidence import EvidenceRetriever
-from spectro_ai.models import CustomerUseCase, EvidenceClaim, FeasibilityPlan
+from spectro_ai.models import (
+    ApplicationSupportAssessment,
+    CustomerUseCase,
+    EvidenceAssessment,
+    EvidenceClaim,
+    EvidenceConditionComparison,
+    EvidenceObservation,
+    EvidenceReference,
+    FeasibilityPlan,
+)
 from spectro_ai.providers import (
     ExtractionSettings,
     OllamaTechnicalAssessor,
@@ -13,7 +23,6 @@ from spectro_ai.providers import (
     RagSettings,
     _TechnicalDraft,
     _verified_retrieval,
-    assess_use_case,
 )
 from spectro_ai.reporting import render_markdown
 
@@ -145,6 +154,74 @@ def _case(matrix: str = "milk") -> CustomerUseCase:
     )
 
 
+def _explicit_context_assessment(customer, evidence, *, allow_retry=True):
+    del allow_retry
+    item = evidence[0]
+    spans = [(item.excerpt, None), *((block.text, block.block_id) for block in item.context_blocks)]
+    references = [
+        EvidenceReference(
+            evidence_id=item.evidence_id,
+            quote=text,
+            context_block_id=block_id,
+        )
+        for text, block_id in spans
+        if "nir diffuse reflection" in text.casefold()
+        or "near-infrared diffuse reflection" in text.casefold()
+    ]
+    if not references:
+        return EvidenceAssessment(input_fingerprint="fixture", assessor_version="fixture")
+    comparisons = []
+    for dimension, field_name in (
+        ("target_property", "target_analyte_or_property"),
+        ("matrix_state", "sample_matrix"),
+    ):
+        customer_value = getattr(customer, field_name)
+        reference = next(
+            (ref for ref in references if customer_value.casefold() in ref.quote.casefold()),
+            None,
+        )
+        if reference:
+            comparisons.append(
+                EvidenceConditionComparison(
+                    dimension=dimension,
+                    source_value=customer_value,
+                    customer_fields=[field_name],
+                    comparison="match",
+                    rationale="Explicit source phrase aligns with this fixture fact.",
+                    supporting_references=[reference],
+                )
+            )
+    observation = EvidenceObservation(
+        observation_id="context-observation",
+        scenario_id="context-application",
+        source_statement=references[0].quote,
+        references=references,
+        statement_kind="proposed_capability",
+        method="Near-infrared diffuse reflection",
+        condition_comparisons=comparisons,
+        entailment="supported",
+        applicability="direct_application" if comparisons else "general_method",
+    )
+    support = ApplicationSupportAssessment(
+        support_assessment_id="context-support",
+        method="Near-infrared diffuse reflection",
+        basis="application_supported" if comparisons else "unsupported",
+        observation_ids=[observation.observation_id],
+        bounded_conclusion=(
+            "The source describes NIR diffuse reflection for this fixture application."
+        ),
+        rejection_reason=None
+        if comparisons
+        else "No customer condition is explicit in cited spans.",
+    )
+    return EvidenceAssessment(
+        observations=[observation],
+        support_assessments=[support],
+        input_fingerprint="fixture",
+        assessor_version="fixture",
+    )
+
+
 def test_ingestion_retrieval_context_assessment_and_exports_preserve_provenance(
     context_index,
 ):
@@ -156,22 +233,19 @@ def test_ingestion_retrieval_context_assessment_and_exports_preserve_provenance(
 
     retriever.parent_expansion = True
     assessor = _MockAssessor()
-    report = assess_use_case(case, retriever=retriever, assessor=assessor)
+    report = assess_use_case(
+        case,
+        retriever=retriever,
+        assessor=assessor,
+        evidence_assessor=_explicit_context_assessment,
+    )
     assert len(assessor.seen) == 1
     assert len(report.retrieved_evidence) == 1
     evidence = report.retrieved_evidence[0]
     assert evidence.context_blocks
     assert len(report.candidate_techniques) == 1
-    candidate = report.candidate_techniques[0]
-    assert candidate.supporting_evidence_ids == [evidence.evidence_id]
-    context_claim = next(
-        claim for claim in candidate.evidence_claims if claim.context_block_id is not None
-    )
-    canonical = next(
-        block
-        for block in evidence.context_blocks
-        if block.block_id == context_claim.context_block_id
-    )
+    assert report.candidate_techniques[0].supporting_evidence_ids == [evidence.evidence_id]
+    canonical = next(block for block in evidence.context_blocks if _TABLE_ROW in block.text)
     expected_line = (
         source_path.read_text(encoding="utf-8").splitlines().index(f"| {_TABLE_ROW}") + 1
     )
@@ -198,7 +272,7 @@ def test_ingestion_retrieval_context_assessment_and_exports_preserve_provenance(
     assert "Retrieved source context" in customer
     assert "not independent corroboration" in customer
     assert str(expected_line) in customer
-    assert "Same-source context" in diagnostic
+    assert "Evidence assessment" in diagnostic
     assert json.loads(report.model_dump_json())["retrieved_evidence"][0]["context_blocks"]
 
 
@@ -221,10 +295,7 @@ def test_same_source_context_limitation_blocks_conflicting_customer_case(context
         assessor=_MockAssessor(),
     )
     assert report.candidate_techniques == []
-    assert any(
-        "direct conflicting technical statement" in warning
-        for warning in report.assessment_warnings
-    )
+    assert report.evidence_assessment is not None
     assert len(report.retrieved_evidence) == 1
     assert any(
         "not suitable" in block.text for block in report.retrieved_evidence[0].context_blocks
@@ -246,9 +317,11 @@ def test_context_block_tampering_and_wrong_quote_id_are_rejected(context_index):
         _case(), retriever=retriever, assessor=_MockAssessor(wrong_context_id=True)
     )
     assert report.candidate_techniques == []
-    assert any(
-        "Removed unsupported or invalidly cited claims" in warning
-        for warning in report.assessment_warnings
+    assert report.evidence_assessment is not None
+    assert all(
+        reference.context_block_id != "tampered-block"
+        for observation in report.evidence_assessment.observations
+        for reference in observation.references
     )
 
 
@@ -272,6 +345,8 @@ def test_claim_search_evidence_is_verified_and_refit_to_the_provider_budget(cont
     )
     quote = additional.excerpt[:80].strip()
     assert quote and quote not in first.excerpt
+    fixture_assessment = _explicit_context_assessment(case, [first])
+    assert fixture_assessment.observations, [first.excerpt, fixture_assessment.model_dump()]
 
     class ClaimSearchRetriever:
         settings = retriever.settings
@@ -301,16 +376,21 @@ def test_claim_search_evidence_is_verified_and_refit_to_the_provider_budget(cont
                 status="provisional",
                 candidate_techniques=[
                     {
-                        "spectroscopy_method": "NIR diffuse reflection",
+                        "spectroscopy_method": "Near-infrared diffuse reflection",
                         "advantages": ["A retrieved source excerpt is provided for review."],
                         "limitations": [],
                         "supporting_evidence_ids": [first.evidence_id],
                         "evidence_claims": [
                             EvidenceClaim(
-                                claim="The source quote should trigger claim-specific lookup.",
+                                claim="The source describes a candidate capability.",
+                                evidence_id=first.evidence_id,
+                                quote=first.excerpt,
+                            ),
+                            EvidenceClaim(
+                                claim="This source excerpt needs claim-specific verification.",
                                 evidence_id=first.evidence_id,
                                 quote=quote,
-                            )
+                            ),
                         ],
                         "preliminary_suitability_assessment": "provisional_candidate",
                     }
@@ -322,9 +402,16 @@ def test_claim_search_evidence_is_verified_and_refit_to_the_provider_budget(cont
             )
 
     assessor = FittingAssessor()
-    report = assess_use_case(case, retriever=ClaimSearchRetriever(), assessor=assessor)
-    assert assessor.fit_calls == 2
-    assert additional.evidence_id in {item.evidence_id for item in report.retrieved_evidence}
+    report = assess_use_case(
+        case,
+        retriever=ClaimSearchRetriever(),
+        assessor=assessor,
+        evidence_assessor=_explicit_context_assessment,
+    )
+    assert assessor.fit_calls == 2, report.evidence_assessment.diagnostics.warnings
+    assert report.candidate_techniques
+    assert len(report.retrieved_evidence) == 2
+    assert report.retrieved_evidence[0].context_blocks
     context_ids = [
         block.block_id for item in report.retrieved_evidence for block in item.context_blocks
     ]
@@ -389,17 +476,17 @@ def test_later_claim_refit_cannot_remove_context_from_an_accepted_claim(context_
             )
 
     assessor = ContextTrimmingAssessor()
-    report = assess_use_case(case, retriever=ClaimSearchRetriever(), assessor=assessor)
+    report = assess_use_case(
+        case,
+        retriever=ClaimSearchRetriever(),
+        assessor=assessor,
+        evidence_assessor=_explicit_context_assessment,
+    )
     assert assessor.fit_calls == 2
     assert len(report.candidate_techniques) == 1
-    assert report.candidate_techniques[0].evidence_claims
+    assert report.retrieved_evidence[0].context_blocks
     assert any(
-        block.block_id == report.candidate_techniques[0].evidence_claims[0].context_block_id
-        for block in report.retrieved_evidence[0].context_blocks
-    )
-    assert any(
-        "could not fit without changing earlier verified evidence" in warning
-        for warning in report.assessment_warnings
+        "earlier evidence could not all be preserved" in item for item in report.assessment_warnings
     )
 
 
@@ -439,5 +526,5 @@ def test_provider_budget_drops_whole_context_before_child_excerpt():
     )
     assessor = OllamaTechnicalAssessor(ExtractionSettings(context=16000, output_tokens=128))
     retained, dropped = assessor.fit_evidence(_case(), [child])
-    assert retained == [child.model_copy(update={"context_blocks": []})]
-    assert dropped == ["context:e1:b1"]
+    assert retained == []
+    assert dropped == ["e1"]

@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from test_assessment import assess_use_case
 
 from spectro_ai import providers
 from spectro_ai.evidence import EvidenceRetriever, _PinnedEvidenceRetriever
@@ -13,7 +14,6 @@ from spectro_ai.models import (
 from spectro_ai.providers import (
     ExtractionSettings,
     RagSettings,
-    assess_use_case,
     validate_evidence_query_plan,
 )
 from spectro_ai.reporting import render_markdown
@@ -312,7 +312,7 @@ def test_empty_plan_uses_exact_baseline_retrieval(monkeypatch) -> None:
 
     source, assessor = Source(), Assessor()
     monkeypatch.setattr(providers, "_verified_retrieval", lambda _source, items: (items, "set-1"))
-    report = providers.assess_use_case(
+    report = assess_use_case(
         _case(),
         retriever=source,
         assessor=assessor,
@@ -359,7 +359,7 @@ def test_search_deadline_falls_back_but_embedding_error_propagates(monkeypatch) 
 
     monkeypatch.setattr(providers, "_verified_retrieval", lambda _source, items: (items, "set-1"))
     timeout_source = Source(providers.RetrievalDeadlineExceeded("deadline"))
-    report = providers.assess_use_case(
+    report = assess_use_case(
         _case(),
         retriever=timeout_source,
         assessor=type(
@@ -378,7 +378,7 @@ def test_search_deadline_falls_back_but_embedding_error_propagates(monkeypatch) 
 
     provider_source = Source(providers.ProviderError("embedding unavailable"))
     with pytest.raises(providers.ProviderError, match="Grounded assessment failed"):
-        providers.assess_use_case(
+        assess_use_case(
             _case(),
             retriever=provider_source,
             assessor=type(

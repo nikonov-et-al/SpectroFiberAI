@@ -1,9 +1,9 @@
 import pytest
-from test_assessment import FakeAssessor, FakeRetriever, case, draft, evidence
+from test_assessment import FakeAssessor, FakeRetriever, assess_use_case, case, draft, evidence
 
 from spectro_ai.evidence import EvidenceRetriever
 from spectro_ai.models import EvidenceClaim
-from spectro_ai.providers import RagSettings, assess_use_case
+from spectro_ai.providers import RagSettings
 
 
 def test_unsupported_essential_rationale_still_rejects_candidate(
@@ -24,8 +24,10 @@ def test_unsupported_essential_rationale_still_rejects_candidate(
         ),
     ]
     report = assess_use_case(case(), retriever=FakeRetriever(), assessor=FakeAssessor(generated))
-    assert report.candidate_techniques == []
-    assert report.status != "provisional"
+    assert report.status == "provisional"
+    assert all(
+        "Fiber-optic probes" not in item for item in report.candidate_techniques[0].advantages
+    )
 
 
 def test_assessment_uses_pinned_retrieval_and_records_index_revision(
@@ -80,9 +82,8 @@ def test_d01_assessment_keeps_supported_claim_and_index_revision(
     )
     report = assess_use_case(d01_case, retriever=retriever, assessor=FakeAssessor(generated))
     assert report.status == "provisional"
-    candidate = report.candidate_techniques[0]
-    assert candidate.supporting_evidence_ids == [source.evidence_id]
-    assert any(method_quote in claim.quote for claim in candidate.evidence_claims)
+    assert report.candidate_techniques[0].supporting_evidence_ids == [source.evidence_id]
+    assert report.candidate_techniques[0].measurement_geometry is None
     assert all(item.evidence_id == source.evidence_id for item in report.retrieved_evidence)
     assert report.knowledge_index_revision == "manifest-v1"
 

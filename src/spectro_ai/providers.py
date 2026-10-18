@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from spectro_ai.evidence import EvidenceRetriever, canonical_context_block
+from spectro_ai.evidence_assessment import evidence_fingerprint, validate_assessment
 from spectro_ai.guardrails import (
     abstention_report,
     missing_fields,
@@ -23,10 +24,16 @@ from spectro_ai.guardrails import (
 )
 from spectro_ai.models import (
     CUSTOMER_FACT_FIELDS,
+    ApplicationSupportAssessment,
     AssessmentReport,
     CustomerUseCase,
     Evidence,
+    EvidenceAssessment,
+    EvidenceAssessmentDiagnostics,
     EvidenceClaim,
+    EvidenceConflict,
+    EvidenceCoverage,
+    EvidenceObservation,
     EvidenceQueryPlan,
     EvidenceQuestion,
     FeasibilityPlan,
@@ -889,8 +896,33 @@ class _TechnicalDraft(BaseModel):
 
 class TechnicalAssessor(Protocol):
     def assess(
-        self, use_case: CustomerUseCase, evidence: list[RetrievedEvidence]
+        self,
+        use_case: CustomerUseCase,
+        evidence: list[RetrievedEvidence],
+        *,
+        evidence_assessment: EvidenceAssessment,
     ) -> AssessmentReport: ...
+
+
+class EvidenceAssessmentDraft(BaseModel):
+    """Provider output; provenance and assessment identity are host supplied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observations: list[EvidenceObservation] = Field(default_factory=list)
+    support_assessments: list[ApplicationSupportAssessment] = Field(default_factory=list)
+    conflicts: list[EvidenceConflict] = Field(default_factory=list)
+    coverage: list[EvidenceCoverage] = Field(default_factory=list)
+
+
+class EvidenceAssessor(Protocol):
+    def __call__(
+        self,
+        use_case: CustomerUseCase,
+        evidence: list[RetrievedEvidence],
+        *,
+        allow_retry: bool = True,
+    ) -> EvidenceAssessment: ...
 
 
 class UseCaseExtractor(Protocol):
@@ -929,11 +961,233 @@ def _assessment_prompt() -> str:
         prompt = path.read_text(encoding="utf-8")
     except OSError:
         raise ProviderError("Assessment prompt is missing from the installation") from None
-    return (
-        prompt
-        + "\nAuthoritative output JSON schema:\n"
-        + json.dumps(_technical_schema(), separators=(",", ":"))
-    )
+    return prompt + "\nOutput JSON schema is supplied separately in the structured response format."
+
+
+class OllamaEvidenceAssessor:
+    """Assess source observations before synthesis using configured provider."""
+
+    VERSION = "application-evidence-assessment-v3"
+
+    def __init__(self, settings: ExtractionSettings | None = None) -> None:
+        self.settings = settings or ExtractionSettings.from_env()
+
+    @staticmethod
+    def _schema(evidence: list[RetrievedEvidence] | None = None) -> dict:
+        def compact(value):
+            if isinstance(value, dict):
+                return {
+                    key: compact(item)
+                    for key, item in value.items()
+                    if key not in {"title", "default"}
+                }
+            if isinstance(value, list):
+                return [compact(item) for item in value]
+            return value
+
+        schema = _strict_schema(compact(EvidenceAssessmentDraft.model_json_schema()))
+        if evidence is not None:
+            definitions = schema["$defs"]
+            definitions["CustomerFactField"] = {
+                "type": "string",
+                "enum": list(CUSTOMER_FACT_FIELDS),
+            }
+            evidence_ids = sorted(item.evidence_id for item in evidence)
+            block_ids = sorted(block.block_id for item in evidence for block in item.context_blocks)
+            definitions["EvidenceReference"]["properties"]["evidence_id"]["enum"] = evidence_ids
+            context_schema = definitions["EvidenceReference"]["properties"]["context_block_id"]
+            context_schema["anyOf"] = (
+                [{"type": "string", "enum": block_ids}, {"type": "null"}]
+                if block_ids
+                else [{"type": "null"}]
+            )
+            definitions["EvidenceCoverage"]["properties"]["evidence_id"]["enum"] = evidence_ids
+            for name in ("EvidenceConditionComparison", "ExploratoryBridge"):
+                definitions[name]["properties"]["customer_fields"]["items"] = {
+                    "$ref": "#/$defs/CustomerFactField"
+                }
+            definitions["EvidenceObservation"]["properties"].pop("context_availability", None)
+            definitions["EvidenceObservation"]["required"].remove("context_availability")
+        return schema
+
+    @staticmethod
+    def _messages(use_case: CustomerUseCase, evidence: list[RetrievedEvidence]) -> list[dict]:
+        prompt_path = Path(__file__).resolve().parents[2] / "prompts" / "evidence_assessment.md"
+        if not prompt_path.is_file():
+            prompt_path = Path(__file__).parent / "data" / "prompts" / "evidence_assessment.md"
+        try:
+            prompt = prompt_path.read_text(encoding="utf-8")
+        except OSError:
+            raise ProviderError(
+                "Evidence assessment prompt is missing from the installation"
+            ) from None
+        customer = {
+            "validated_customer_facts": {
+                field: value
+                for field in (*CUSTOMER_FACT_FIELDS, "customer_preferences", "strict_requirements")
+                if (value := getattr(use_case, field)) not in (None, [])
+            },
+            "unknown_fields": missing_fields(use_case),
+            "contradictions": list(use_case.contradictions),
+        }
+        sources = []
+        for item in evidence:
+            sources.append(
+                {
+                    "evidence_id": item.evidence_id,
+                    "source_id": item.source_id,
+                    "document_version": item.document_version,
+                    "page_or_section": item.page_or_section,
+                    "source_locations": [
+                        loc.model_dump(mode="json") for loc in item.source_locations
+                    ],
+                    "excerpt": item.excerpt,
+                    "review_status": item.review_status,
+                    "source_scope": item.source_scope,
+                    "context_availability": "attached_context"
+                    if item.context_blocks
+                    else "child_only",
+                    "context_omissions": item.context_omissions,
+                    "context_blocks": [
+                        block.model_dump(mode="json") for block in item.context_blocks
+                    ],
+                }
+            )
+        return [
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"customer": customer, "evidence_bundles": sources},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+
+    def fit_evidence(
+        self, use_case: CustomerUseCase, evidence: list[RetrievedEvidence]
+    ) -> tuple[list[RetrievedEvidence], list[str]]:
+        """Fit complete evidence bundles; keep each excerpt with all attached context."""
+        retained = list(evidence)
+        dropped: list[str] = []
+        schema_bytes = len(
+            json.dumps(self._schema(evidence), separators=(",", ":")).encode("utf-8")
+        )
+        while retained:
+            messages = self._messages(use_case, retained)
+            request_bytes = (
+                len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                + schema_bytes
+            )
+            if request_bytes + self.settings.output_tokens + 256 <= self.settings.context:
+                return retained, dropped
+            dropped.append(retained.pop().evidence_id)
+        return [], dropped
+
+    def __call__(
+        self,
+        use_case: CustomerUseCase,
+        evidence: list[RetrievedEvidence],
+        *,
+        allow_retry: bool = True,
+    ) -> EvidenceAssessment:
+        from time import perf_counter
+
+        messages = self._messages(use_case, evidence)
+        schema = self._schema(evidence)
+        serialized_bytes = len(
+            json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ) + len(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
+        if serialized_bytes + self.settings.output_tokens + 256 > self.settings.context:
+            raise ProviderError("Evidence assessment exceeds configured context budget")
+        payload = {
+            "model": self.settings.model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+            "format": schema,
+            "options": {
+                "num_ctx": self.settings.context,
+                "num_predict": self.settings.output_tokens,
+                "temperature": 0,
+            },
+        }
+        started = perf_counter()
+        usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "call_count": 0}
+        for attempt in range(2 if allow_retry else 1):
+            try:
+                if attempt:
+                    messages = [
+                        *messages,
+                        {
+                            "role": "user",
+                            "content": "Return one valid JSON object matching the schema.",
+                        },
+                    ]
+                    payload["messages"] = messages
+                    request_bytes = len(
+                        json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
+                    ) + len(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
+                    if request_bytes + self.settings.output_tokens + 256 > self.settings.context:
+                        raise ProviderError(
+                            "Evidence assessment structural retry exceeds context budget"
+                        )
+                if self.settings.provider == "openai":
+                    usage = {}
+                    content = _openai_json(
+                        self.settings, messages, schema, usage=usage, temperature=0
+                    )
+                    for key in usage_total:
+                        usage_total[key] += usage.get(key, 1 if key == "call_count" else 0)
+                else:
+                    result = ollama_request(
+                        self.settings, "/api/chat", payload, timeout=self.settings.timeout
+                    )
+                    usage_total["call_count"] += 1
+                    usage_total["prompt_tokens"] += result.get("prompt_eval_count", 0)
+                    usage_total["completion_tokens"] += result.get("eval_count", 0)
+                    if result.get("done_reason") == "length":
+                        raise ProviderError("Evidence assessment exceeded output-token limit")
+                    message = result.get("message")
+                    content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(content, str):
+                    raise ValueError("missing JSON response")
+                draft = EvidenceAssessmentDraft.model_validate_json(content)
+                raw = EvidenceAssessment(
+                    observations=draft.observations,
+                    support_assessments=draft.support_assessments,
+                    conflicts=draft.conflicts,
+                    coverage=draft.coverage,
+                    input_fingerprint="provider-output",
+                    assessor_version=self.VERSION,
+                    diagnostics=EvidenceAssessmentDiagnostics(
+                        call_count=usage_total["call_count"],
+                        elapsed_ms=(perf_counter() - started) * 1000,
+                        serialized_bytes=serialized_bytes,
+                        prompt_tokens=usage_total["prompt_tokens"] or None,
+                        completion_tokens=usage_total["completion_tokens"] or None,
+                    ),
+                )
+                fingerprint = evidence_fingerprint(use_case, evidence, self.VERSION)
+                return validate_assessment(
+                    raw,
+                    use_case,
+                    {item.evidence_id: item for item in evidence},
+                    fingerprint,
+                    self.VERSION,
+                    f"{self.settings.provider}:{self.settings.model}",
+                )
+            except ProviderError:
+                raise
+            except ValidationError, ValueError, TypeError:
+                if attempt + 1 == (2 if allow_retry else 1):
+                    raise ProviderError(
+                        "Evidence assessment returned invalid structured output"
+                    ) from None
+        raise ProviderError("Evidence assessment failed")
 
 
 class OllamaTechnicalAssessor:
@@ -945,7 +1199,7 @@ class OllamaTechnicalAssessor:
     def fit_evidence(
         self, use_case: CustomerUseCase, evidence: list[RetrievedEvidence]
     ) -> tuple[list[RetrievedEvidence], list[str]]:
-        """Drop optional context blocks before lower-ranked child excerpts."""
+        """Fit complete excerpt/context bundles, preserving attached qualifications."""
         retained = list(evidence)
         dropped: list[str] = []
         while retained:
@@ -956,28 +1210,15 @@ class OllamaTechnicalAssessor:
                 <= self.settings.context
             ):
                 return retained, dropped
-            context_index = next(
-                (
-                    index
-                    for index in range(len(retained) - 1, -1, -1)
-                    if retained[index].context_blocks
-                ),
-                None,
-            )
-            if context_index is not None:
-                item = retained[context_index]
-                block = item.context_blocks[-1]
-                dropped.append(f"context:{item.evidence_id}:{block.block_id}")
-                retained[context_index] = item.model_copy(
-                    update={"context_blocks": item.context_blocks[:-1]}
-                )
-            else:
-                dropped.append(retained.pop().evidence_id)
+            dropped.append(retained.pop().evidence_id)
         return [], dropped
 
     @staticmethod
     def _messages(
-        use_case: CustomerUseCase, evidence: list[RetrievedEvidence]
+        use_case: CustomerUseCase,
+        evidence: list[RetrievedEvidence],
+        *,
+        evidence_assessment: EvidenceAssessment | None = None,
     ) -> list[dict[str, str]]:
         customer = {
             "source_text_untrusted": use_case.source_text,
@@ -995,9 +1236,12 @@ class OllamaTechnicalAssessor:
                 "source_id": item.source_id,
                 "document_version": item.document_version,
                 "page_or_section": item.page_or_section,
+                "source_locations": [loc.model_dump(mode="json") for loc in item.source_locations],
                 "excerpt": item.excerpt,
                 "review_status": item.review_status,
                 "source_scope": item.source_scope,
+                "context_availability": "attached_context" if item.context_blocks else "child_only",
+                "context_omissions": item.context_omissions,
             }
             if item.context_blocks:
                 source["context_relation"] = "same source context; not independent evidence"
@@ -1005,33 +1249,65 @@ class OllamaTechnicalAssessor:
                     block.model_dump(mode="json") for block in item.context_blocks
                 ]
             sources.append(source)
+        if evidence_assessment is not None:
+            sources = [
+                {
+                    "evidence_id": item.evidence_id,
+                    "source_id": item.source_id,
+                    "document_version": item.document_version,
+                    "page_or_section": item.page_or_section,
+                    "source_locations": [
+                        loc.model_dump(mode="json") for loc in item.source_locations
+                    ],
+                    "review_status": item.review_status,
+                    "source_scope": item.source_scope,
+                    "context_blocks": [
+                        {
+                            "block_id": block.block_id,
+                            "source_locations": [
+                                loc.model_dump(mode="json") for loc in block.source_locations
+                            ],
+                            "review_status": block.review_status,
+                        }
+                        for block in item.context_blocks
+                    ],
+                }
+                for item in evidence
+            ]
+            user = {
+                "customer_case_untrusted_data": customer,
+                "verified_source_metadata": sources,
+                "assessed_evidence_untrusted_data": evidence_assessment.model_dump(mode="json"),
+            }
+        else:
+            user = {
+                "customer_case_untrusted_data": customer,
+                "retrieved_sources_untrusted_data": sources,
+            }
         return [
             {"role": "system", "content": _assessment_prompt()},
             {
                 "role": "user",
-                "content": json.dumps(
-                    {
-                        "customer_case_untrusted_data": customer,
-                        "retrieved_sources_untrusted_data": sources,
-                    },
-                    ensure_ascii=False,
-                ),
+                "content": json.dumps(user, ensure_ascii=False, separators=(",", ":")),
             },
         ]
 
     def assess(
-        self, use_case: CustomerUseCase, evidence: list[RetrievedEvidence]
+        self,
+        use_case: CustomerUseCase,
+        evidence: list[RetrievedEvidence],
+        *,
+        evidence_assessment: EvidenceAssessment,
     ) -> AssessmentReport:
-        messages = self._messages(use_case, evidence)
-        if (
-            len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-            + (self.settings.output_tokens + 256)
-            > self.settings.context
-        ):
+        messages = self._messages(use_case, evidence, evidence_assessment=evidence_assessment)
+        request_bytes = len(
+            json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        schema_bytes = len(json.dumps(_technical_schema(), separators=(",", ":")).encode("utf-8"))
+        if request_bytes + schema_bytes + self.settings.output_tokens + 256 > self.settings.context:
             raise ProviderError(
-                "Assessment input exceeds the configured context budget. Reduce "
-                "the complete customer text or retrieved excerpt set, or increase "
-                "SPECTRO_AI_CONTEXT."
+                "Assessment synthesis input exceeds configured context budget; "
+                "preserve qualifications by reducing complete evidence bundles."
             )
         payload = {
             "model": self.settings.model,
@@ -1101,7 +1377,7 @@ class OllamaTechnicalAssessor:
                         else "ollama_grounded"
                     ),
                     assessment_provider=self.settings.provider,
-                    report_version=f"grounded-{self.settings.provider}-v1",
+                    report_version=f"grounded-{self.settings.provider}-v2",
                 )
             except ValidationError, ValueError, TypeError:
                 if attempt:
@@ -1455,6 +1731,7 @@ def assess_use_case(
     use_case: CustomerUseCase,
     *,
     assessor: TechnicalAssessor | None = None,
+    evidence_assessor: EvidenceAssessor | None = None,
     retriever: EvidenceRetriever | None = None,
     query_generator: Callable[[CustomerUseCase], EvidenceQueryPlan] | None = None,
 ) -> AssessmentReport:
@@ -1609,8 +1886,11 @@ def assess_use_case(
                 query_diagnostics=query_diagnostics,
             )
         selected_assessor = assessor or OllamaTechnicalAssessor()
+        selected_evidence_assessor = evidence_assessor or OllamaEvidenceAssessor()
         dropped_ids: list[str] = []
-        fit_evidence = getattr(selected_assessor, "fit_evidence", None)
+        fit_evidence = getattr(selected_evidence_assessor, "fit_evidence", None)
+        if fit_evidence is None:
+            fit_evidence = getattr(selected_assessor, "fit_evidence", None)
         if fit_evidence is not None:
             retrieved, dropped_ids = fit_evidence(use_case, retrieved)
             version = _evidence_set_version(
@@ -1632,303 +1912,352 @@ def assess_use_case(
             )
             report.assessment_warnings.append(_budget_drop_warning(dropped_ids))
             return report
-        draft = selected_assessor.assess(use_case, retrieved)
-        known = {item.evidence_id: item for item in retrieved}
-        candidates: list[TechniqueCandidate] = []
-        warnings = []
-        if dropped_ids:
-            warnings.append(_budget_drop_warning(dropped_ids))
-        warnings.append(
-            "Candidate relevance check is lexical screening only; it cannot validate "
-            "entailment or scientific suitability. Expert review required."
+        evidence_assessment = EvidenceAssessment.model_validate(
+            selected_evidence_assessor(use_case, retrieved)
         )
-        rejected = 0
-        relevance_rejected = False
-        conflict_found = False
-        claim_searches = 0
-        searched_claims: set[str] = set()
-        for proposed in draft.candidate_techniques:
-            if proposed.supporting_evidence:
-                warnings.append(
-                    f"Ignored model-generated source objects for {proposed.spectroscopy_method}."
-                )
-            citations = list(dict.fromkeys(proposed.supporting_evidence_ids))
-            absent_ids = [evidence_id for evidence_id in citations if evidence_id not in known]
-            if absent_ids:
-                warnings.append(
-                    f"Removed citations absent from retrieved sources for "
-                    f"{proposed.spectroscopy_method}."
-                )
-            valid_claims: list[EvidenceClaim] = []
-            valid_ids: list[str] = []
-            for claim in proposed.evidence_claims:
-                excerpt = known.get(claim.evidence_id)
-                context_quote = None
-                if claim.context_block_id is not None and excerpt is not None:
-                    context_quote = next(
-                        (
-                            block
-                            for block in excerpt.context_blocks
-                            if block.block_id == claim.context_block_id
-                        ),
-                        None,
+        evidence_assessment = validate_assessment(
+            evidence_assessment,
+            use_case,
+            {item.evidence_id: item for item in retrieved},
+            evidence_fingerprint(
+                use_case,
+                retrieved,
+                getattr(
+                    selected_evidence_assessor, "VERSION", "application-evidence-assessment-v1"
+                ),
+            ),
+            getattr(selected_evidence_assessor, "VERSION", "injected-evidence-assessor"),
+            getattr(evidence_assessment, "model_identity", None),
+        )
+        evidence_assessment.diagnostics.dropped_evidence_ids.extend(
+            item
+            for item in dropped_ids
+            if item not in evidence_assessment.diagnostics.dropped_evidence_ids
+        )
+        conflict_ids = {
+            observation_id
+            for conflict in evidence_assessment.conflicts
+            for observation_id in conflict.observation_ids
+        }
+        if not any(
+            support.basis != "unsupported"
+            and not conflict_ids.intersection(support.observation_ids)
+            for support in evidence_assessment.support_assessments
+        ):
+            report = _abstention_report(
+                use_case,
+                "No nonconflicting supported or exploratory assessment was produced.",
+                status="insufficient_information",
+                provider=provider,
+                evidence=retrieved,
+                evidence_version=version,
+                knowledge_index_revision=index_revision,
+                retrieval_diagnostics=getattr(source, "retrieval_diagnostics", []),
+                query_diagnostics=query_diagnostics,
+            )
+            report.evidence_assessment = evidence_assessment
+            report.report_version = f"grounded-{provider}-v2"
+            report.assessment_warnings.extend(evidence_assessment.diagnostics.warnings)
+            for item in retrieved:
+                if item.review_status not in {"reviewed", "reviewed_for_phase2", "source_reviewed"}:
+                    report.assessment_warnings.append(
+                        f"Source {item.source_id} {item.page_or_section} has review status "
+                        f"{item.review_status}; review does not determine applicability."
                     )
-                if (
-                    claim.context_block_id is None
-                    and excerpt is not None
-                    and claim.quote
-                    and claim.quote not in excerpt.excerpt
-                    and claim_searches < 4
+            return report
+        try:
+            draft = selected_assessor.assess(
+                use_case, retrieved, evidence_assessment=evidence_assessment
+            )
+        except ProviderError as exc:
+            if "context budget" not in str(exc).casefold():
+                raise
+            report = _abstention_report(
+                use_case,
+                "Assessed evidence and qualifications exceed synthesis context; "
+                "no recommendation generated.",
+                status="insufficient_information",
+                provider=provider,
+                evidence=retrieved,
+                evidence_version=version,
+                knowledge_index_revision=index_revision,
+                retrieval_diagnostics=getattr(source, "retrieval_diagnostics", []),
+                query_diagnostics=query_diagnostics,
+            )
+            report.evidence_assessment = evidence_assessment
+            report.report_version = f"grounded-{provider}-v2"
+            report.assessment_warnings.extend(evidence_assessment.diagnostics.warnings)
+            report.assessment_warnings.append(
+                "Synthesis abstained to preserve all assessed limitations and qualifications."
+            )
+            for item in retrieved:
+                if item.review_status not in {"reviewed", "reviewed_for_phase2", "source_reviewed"}:
+                    report.assessment_warnings.append(
+                        f"Source {item.source_id} {item.page_or_section} has review status "
+                        f"{item.review_status}; review does not determine applicability."
+                    )
+            return report
+        repair_additions: dict[str, RetrievedEvidence] = {}
+        searched_claims: set[str] = set()
+        initial_known = {item.evidence_id: item for item in retrieved}
+        existing_context_ids = {
+            block.block_id for item in retrieved for block in item.context_blocks
+        }
+        for proposed in draft.candidate_techniques:
+            for claim in proposed.evidence_claims:
+                current = initial_known.get(claim.evidence_id)
+                if claim.context_block_id is not None or (
+                    current is not None and claim.quote in current.excerpt
                 ):
-                    search_claim = getattr(source, "search_claim", None)
-                    query = f'{claim.claim} "{claim.quote}"'
-                    if search_claim is not None and query.casefold() not in searched_claims:
-                        searched_claims.add(query.casefold())
-                        claim_searches += 1
-                        try:
-                            additional = search_claim(
-                                use_case,
-                                query,
-                                limit=4,
-                            )
-                            matching_extra = next(
-                                (item for item in additional if claim.quote in item.excerpt),
-                                None,
-                            )
-                            verified_extra, _ = (
-                                _verified_retrieval(source, [matching_extra])
-                                if matching_extra is not None
-                                else ([], "")
-                            )
-                            exact_match = verified_extra[0] if verified_extra else None
-                            if exact_match is not None:
-                                already_attached = {
-                                    block.block_id
-                                    for item in retrieved
-                                    for block in item.context_blocks
-                                }
-                                exact_match = exact_match.model_copy(
+                    continue
+                query = f'{claim.claim} "{claim.quote}"'
+                if query.casefold() in searched_claims or len(searched_claims) >= 4:
+                    continue
+                searched_claims.add(query.casefold())
+                search_claim = getattr(source, "search_claim", None)
+                if search_claim is None:
+                    continue
+                try:
+                    extra = search_claim(use_case, query, limit=4)
+                    match = next((item for item in extra if claim.quote in item.excerpt), None)
+                    if match is not None:
+                        verified, _ = _verified_retrieval(source, [match])
+                        if verified and verified[0].evidence_id not in initial_known:
+                            addition = verified[0]
+                            repeated_blocks = [
+                                block
+                                for block in addition.context_blocks
+                                if block.block_id in existing_context_ids
+                            ]
+                            if repeated_blocks:
+                                repeated_ids = [block.block_id for block in repeated_blocks]
+                                addition = addition.model_copy(
                                     update={
                                         "context_blocks": [
                                             block
-                                            for block in exact_match.context_blocks
-                                            if block.block_id not in already_attached
-                                        ]
+                                            for block in addition.context_blocks
+                                            if block.block_id not in existing_context_ids
+                                        ],
+                                        "context_omissions": [
+                                            *addition.context_omissions,
+                                            "Repeated context blocks already attached to prior "
+                                            f"evidence: {', '.join(repeated_ids)}",
+                                        ],
                                     }
                                 )
-                                if exact_match.evidence_id not in known:
-                                    previous = retrieved
-                                    candidate_set = [*previous, exact_match]
-                                    fitted = candidate_set
-                                    extra_dropped: list[str] = []
-                                    if fit_evidence is not None:
-                                        fitted, extra_dropped = fit_evidence(
-                                            use_case, candidate_set
-                                        )
-                                    preserved = len(fitted) >= len(previous) and all(
-                                        old.model_dump(mode="json") == new.model_dump(mode="json")
-                                        for old, new in zip(previous, fitted, strict=False)
-                                    )
-                                    retained_extra = any(
-                                        item.evidence_id == exact_match.evidence_id
-                                        for item in fitted
-                                    )
-                                    if preserved and retained_extra:
-                                        retrieved = fitted
-                                        dropped_ids.extend(extra_dropped)
-                                        if extra_dropped:
-                                            warnings.append(_budget_drop_warning(extra_dropped))
-                                        known = {item.evidence_id: item for item in retrieved}
-                                        version = _evidence_set_version(
-                                            retrieved,
-                                            str(initial_metadata["manifest_version"]),
-                                        )
-                                    else:
-                                        warnings.append(
-                                            "Claim-specific evidence was not added because "
-                                            "it could not fit without changing earlier verified "
-                                            "evidence or dropping the new excerpt."
-                                        )
-                                        exact_match = None
-                                else:
-                                    exact_match = known[exact_match.evidence_id]
-                                if exact_match is None:
-                                    continue
-                                exact_match = known.get(exact_match.evidence_id)
-                                if (
-                                    exact_match is not None
-                                    and exact_match.evidence_id not in citations
-                                ):
-                                    citations.append(exact_match.evidence_id)
-                                if exact_match is None:
-                                    continue
-                                claim = claim.model_copy(
-                                    update={"evidence_id": exact_match.evidence_id}
-                                )
-                                excerpt = exact_match
-                                warnings.append(
-                                    "Claim quote verified from additional retrieved evidence."
-                                )
-                        except ProviderError, ValueError:
-                            warnings.append(
-                                "Claim-specific source retrieval failed validation; "
-                                "the claim was not accepted."
+                            repair_additions[addition.evidence_id] = addition
+                            existing_context_ids.update(
+                                block.block_id for block in addition.context_blocks
                             )
-                if (
-                    claim.evidence_id in citations
-                    and excerpt is not None
-                    and claim.quote
-                    and (
-                        claim.quote in excerpt.excerpt
-                        if claim.context_block_id is None
-                        else context_quote is not None and claim.quote in context_quote.text
-                    )
-                ):
-                    valid_claims.append(
-                        EvidenceClaim(
-                            claim=f"Source states: “{claim.quote}”",
-                            evidence_id=claim.evidence_id,
-                            quote=claim.quote,
-                            context_block_id=claim.context_block_id,
-                        )
-                    )
-                    if claim.evidence_id not in valid_ids:
-                        valid_ids.append(claim.evidence_id)
-            if len(valid_claims) != len(proposed.evidence_claims):
-                warnings.append(
-                    f"Removed unsupported or invalidly cited claims from "
-                    f"{proposed.spectroscopy_method}."
-                )
-            negative_claim = re.compile(
-                r"\b(no|not|cannot|can't|unable|limited|limitation|unsuitable|"
-                r"poor|failed|failure|doesn't|does not|without)\b",
-                re.I,
+                except ProviderError, ValueError:
+                    continue
+        repair_warning = None
+        if repair_additions:
+            old_evidence = list(retrieved)
+            candidate_set = [*old_evidence, *repair_additions.values()]
+            # Recheck exact pinned provenance after deduplicating only newly added context.
+            candidate_set, _ = _verified_retrieval(source, candidate_set)
+            fitted, newly_dropped = (
+                fit_evidence(use_case, candidate_set) if fit_evidence else (candidate_set, [])
             )
-            positive = [item for item in valid_claims if not negative_claim.search(item.quote)]
-            eligible_support = [
-                item
-                for item in positive
-                if _candidate_method_named(proposed, item.quote)
-                and _supports_candidate(use_case, proposed, [known[item.evidence_id]])
-            ]
-            if not eligible_support:
-                warnings.append(
-                    f"Removed {proposed.spectroscopy_method}: no valid positive source quote "
-                    "supports both a named method and the requested case."
+            preserves_old = len(fitted) >= len(old_evidence) and all(
+                old.model_dump(mode="json") == new.model_dump(mode="json")
+                for old, new in zip(old_evidence, fitted, strict=False)
+            )
+            if preserves_old and len(fitted) > len(old_evidence):
+                try:
+                    augmented = EvidenceAssessment.model_validate(
+                        selected_evidence_assessor(use_case, fitted, allow_retry=False)
+                    )
+                    augmented = validate_assessment(
+                        augmented,
+                        use_case,
+                        {item.evidence_id: item for item in fitted},
+                        evidence_fingerprint(
+                            use_case,
+                            fitted,
+                            getattr(
+                                selected_evidence_assessor,
+                                "VERSION",
+                                "application-evidence-assessment-v1",
+                            ),
+                        ),
+                        getattr(
+                            selected_evidence_assessor, "VERSION", "injected-evidence-assessor"
+                        ),
+                        getattr(augmented, "model_identity", None),
+                    )
+                    prior_diagnostics = evidence_assessment.diagnostics
+                    next_diagnostics = augmented.diagnostics
+                    augmented.diagnostics = next_diagnostics.model_copy(
+                        update={
+                            "status": "partial"
+                            if "partial" in {prior_diagnostics.status, next_diagnostics.status}
+                            else next_diagnostics.status,
+                            "warnings": list(
+                                dict.fromkeys(
+                                    prior_diagnostics.warnings + next_diagnostics.warnings
+                                )
+                            ),
+                            "dropped_evidence_ids": list(
+                                dict.fromkeys(
+                                    prior_diagnostics.dropped_evidence_ids
+                                    + next_diagnostics.dropped_evidence_ids
+                                    + newly_dropped
+                                )
+                            ),
+                            "call_count": prior_diagnostics.call_count
+                            + next_diagnostics.call_count,
+                            "elapsed_ms": (prior_diagnostics.elapsed_ms or 0)
+                            + (next_diagnostics.elapsed_ms or 0),
+                            "serialized_bytes": (prior_diagnostics.serialized_bytes or 0)
+                            + (next_diagnostics.serialized_bytes or 0),
+                            "prompt_tokens": (
+                                prior_diagnostics.prompt_tokens + next_diagnostics.prompt_tokens
+                                if prior_diagnostics.prompt_tokens is not None
+                                and next_diagnostics.prompt_tokens is not None
+                                else None
+                            ),
+                            "completion_tokens": (
+                                prior_diagnostics.completion_tokens
+                                + next_diagnostics.completion_tokens
+                                if prior_diagnostics.completion_tokens is not None
+                                and next_diagnostics.completion_tokens is not None
+                                else None
+                            ),
+                        }
+                    )
+                    augmented_draft = selected_assessor.assess(
+                        use_case, fitted, evidence_assessment=augmented
+                    )
+                    retrieved = fitted
+                    evidence_assessment = augmented
+                    version = _evidence_set_version(
+                        retrieved, str(initial_metadata["manifest_version"])
+                    )
+                    draft = augmented_draft
+                    dropped_ids.extend(newly_dropped)
+                except ProviderError, ValidationError, ValueError, TypeError:
+                    repair_warning = (
+                        "Claim-specific additions rejected: augmented assessment failed."
+                    )
+            else:
+                repair_warning = (
+                    "Claim-specific additions rejected: earlier evidence could not "
+                    "all be preserved."
                 )
-                rejected += 1
-                relevance_rejected = bool(valid_claims)
+        known = {item.evidence_id: item for item in retrieved}
+        candidates: list[TechniqueCandidate] = []
+        warnings: list[str] = []
+        if dropped_ids:
+            warnings.append(_budget_drop_warning(dropped_ids))
+        if repair_warning:
+            warnings.append(repair_warning)
+        conflicts = {
+            oid for conflict in evidence_assessment.conflicts for oid in conflict.observation_ids
+        }
+        observations = {item.observation_id: item for item in evidence_assessment.observations}
+        for support in evidence_assessment.support_assessments:
+            if support.basis == "unsupported":
+                warnings.append(
+                    f"Unsupported candidate {support.method} withheld: "
+                    f"{support.rejection_reason or support.bounded_conclusion}"
+                )
                 continue
-            supporting = [known[evidence_id] for evidence_id in valid_ids]
-            if not _supports_candidate(use_case, proposed, supporting):
-                warnings.append(
-                    f"Removed {proposed.spectroscopy_method}: retrieved excerpts did "
-                    "not lexically support both method and case; expert review required."
-                )
-                rejected += 1
-                relevance_rejected = True
+            if any(oid in conflicts for oid in support.observation_ids):
+                warnings.append(f"Withheld {support.method}: unresolved evidence conflict.")
                 continue
-            target_terms = re.findall(r"[a-zA-Z]{3,}", use_case.target_analyte_or_property or "")
-            matrix_terms = re.findall(r"[a-zA-Z]{3,}", use_case.sample_matrix or "")
-            negative = re.compile(
-                r"\b(?:cannot|can not|not|no|unable|unsuitable|does not|fails to)\b",
-                re.I,
-            )
-            positive_sources = {item.source_id for item in supporting}
-            conflict = next(
-                (
-                    (item, block_id)
-                    for item in retrieved
-                    for block_id, text in (
-                        [(None, item.excerpt)]
-                        + [(block.block_id, block.text) for block in item.context_blocks]
-                    )
-                    if (item.source_id not in positive_sources or block_id is not None)
-                    and any(
-                        negative.search(sentence)
-                        and _candidate_method_named(proposed, sentence)
-                        and any(
-                            re.search(rf"\b{re.escape(term)}\b", sentence, re.I)
-                            for term in target_terms
-                        )
-                        and any(
-                            re.search(rf"\b{re.escape(term)}\b", sentence, re.I)
-                            for term in matrix_terms
-                        )
-                        for sentence in re.split(r"(?<=[.!?])\s+", text)
-                    )
-                ),
-                None,
-            )
-            if conflict:
-                conflict_item, context_block_id = conflict
-                location = (
-                    f" context block {context_block_id}" if context_block_id is not None else ""
-                )
-                conflict_found = True
-                warnings.append(
-                    f"Withheld {proposed.spectroscopy_method}: direct conflicting technical "
-                    f"statement found in {conflict_item.evidence_id}{location}; "
-                    "expert resolution required."
-                )
-                rejected += 1
-                relevance_rejected = True
+            rows = [observations[oid] for oid in support.observation_ids if oid in observations]
+            refs = [reference for row in rows for reference in row.references]
+            bridge = support.exploratory_bridge
+            if bridge is not None:
+                refs.extend(bridge.source_premises)
+            unique_refs = []
+            seen_refs = set()
+            for reference in refs:
+                key = (reference.evidence_id, reference.context_block_id, reference.quote)
+                if key not in seen_refs and reference.evidence_id in known:
+                    seen_refs.add(key)
+                    unique_refs.append(reference)
+            if not unique_refs:
+                warnings.append(f"Withheld {support.method}: no validated source references.")
                 continue
-            candidate_data = proposed.model_dump()
-            candidate_data["supporting_evidence"] = []
-            candidate_data["advantages"] = [item.claim for item in positive]
-            candidate_data["limitations"] = [
-                item.claim for item in valid_claims if negative_claim.search(item.quote)
+            claims = [
+                EvidenceClaim(
+                    claim=f"Source states: “{ref.quote}”",
+                    evidence_id=ref.evidence_id,
+                    quote=ref.quote,
+                    context_block_id=ref.context_block_id,
+                    observation_id=next(
+                        (
+                            row.observation_id
+                            for row in rows
+                            if any(
+                                item.evidence_id == ref.evidence_id
+                                and item.context_block_id == ref.context_block_id
+                                and ref.quote in item.quote
+                                for item in row.references
+                            )
+                        ),
+                        None,
+                    ),
+                    support_assessment_id=support.support_assessment_id,
+                    claim_use="source_observation",
+                )
+                for ref in unique_refs
             ]
-            candidate_data["evidence_claims"] = valid_claims
-            candidate_data["supporting_evidence_ids"] = valid_ids
-            candidate_data["rule_rationale"] = None
-            candidate_data["required_assumptions"] = [
-                "Transferability to customer samples and operating conditions is unknown."
-            ]
-            source_text = " ".join(
-                text.casefold()
-                for item in supporting
-                for text in (item.excerpt, *(block.text for block in item.context_blocks))
+            conclusion = support.bounded_conclusion.strip()
+            if support.basis == "reasoned_exploratory":
+                conclusion = (
+                    f"Engineering reasoning (exploratory): {conclusion} "
+                    f"Hypothesis: {bridge.hypothesis} Inference: {bridge.inference}"
+                )
+            limitations = list(
+                dict.fromkeys(
+                    [text for row in rows for text in row.transfer_limitations]
+                    + (bridge.application_differences if bridge else [])
+                    + (bridge.unknown_gaps if bridge else [])
+                    + (bridge.possible_failure_mechanisms if bridge else [])
+                )
             )
-            for field in ("measurement_geometry", "proposed_spectral_region"):
-                value = candidate_data[field]
-                if value and value.casefold() not in source_text:
-                    candidate_data[field] = None
-                    warnings.append(
-                        f"Removed unsupported {field.replace('_', ' ')} from "
-                        f"{proposed.spectroscopy_method}."
-                    )
-            config = candidate_data["potential_probe_configuration"]
-            if config and (
-                config.casefold() not in source_text
-                or re.search(
-                    r"\d|customer.{0,20}(?:has|uses|existing|installed|configured)|"
-                    r"is installed|is configured",
-                    config,
-                    re.IGNORECASE,
+            candidates.append(
+                TechniqueCandidate(
+                    spectroscopy_method=support.method,
+                    measurement_geometry=next((row.geometry for row in rows if row.geometry), None),
+                    advantages=[conclusion],
+                    limitations=limitations,
+                    required_assumptions=[
+                        "Exploratory bridge needs expert review and a falsifiable study."
+                    ]
+                    if bridge
+                    else ["Customer-specific performance and compatibility remain unestablished."],
+                    supporting_evidence_ids=list(
+                        dict.fromkeys(ref.evidence_id for ref in unique_refs)
+                    ),
+                    evidence_claims=claims,
+                    support_assessment_id=support.support_assessment_id,
+                    consideration_basis=support.basis,
+                    rule_rationale=conclusion,
                 )
-            ):
-                candidate_data["potential_probe_configuration"] = None
+            )
+        for item in retrieved:
+            if item.review_status not in {"reviewed", "reviewed_for_phase2", "source_reviewed"}:
                 warnings.append(
-                    f"Removed unsupported customer configuration for "
-                    f"{proposed.spectroscopy_method}."
+                    f"Source {item.source_id} {item.page_or_section} has review status "
+                    f"{item.review_status}; review does not determine applicability."
                 )
-            candidates.append(TechniqueCandidate(**candidate_data))
+        for warning in evidence_assessment.diagnostics.warnings:
+            warnings.append(f"Evidence assessment: {warning}")
         if not candidates:
             status = (
                 "outside_supported_scope"
-                if draft.status == "outside_supported_scope" or relevance_rejected
+                if draft.status == "outside_supported_scope"
                 else "insufficient_information"
             )
-            if draft.candidate_techniques:
-                warnings.append("No candidate passed evidence membership and relevance checks.")
+            if evidence_assessment.support_assessments:
+                warnings.append("No candidate passed structured evidence assessment checks.")
             rationale = (
-                "Directly conflicting technical statements require expert resolution "
-                "before technique selection."
-                if conflict_found
-                else "No candidate passed source membership and relevance checks; "
-                "method selection is withheld."
+                "No candidate passed structured evidence assessment; consideration withheld."
             )
             plan = _abstention_report(
                 use_case,
@@ -1946,21 +2275,33 @@ def assess_use_case(
                 "production readiness is not assessed."
             )
             plan = draft.proposed_feasibility_experiment
-        for item in retrieved:
-            if item.review_status not in {"reviewed", "reviewed_for_phase2", "source_reviewed"}:
-                warnings.append(
-                    f"Source {item.source_id} {item.page_or_section} review status "
-                    f"is {item.review_status}."
-                )
-        plan, plan_warnings = _apply_feasibility_safeguards(use_case, plan, candidates)
+        application_supported = [
+            candidate
+            for candidate in candidates
+            if candidate.consideration_basis == "application_supported"
+        ]
+        plan, plan_warnings = _apply_feasibility_safeguards(use_case, plan, application_supported)
+        if candidates and not application_supported:
+            plan = FeasibilityPlan(
+                objective="Resolve evidence gaps before deciding on an application study.",
+                hypothesis="No application-specific performance outcome is established.",
+                experimental_steps=[
+                    "Resolve application differences and unknown gaps with the customer.",
+                    "Request expert review of exploratory reasoning before study selection.",
+                ],
+                expected_limitations=[
+                    "Exploratory consideration establishes neither suitability nor priority."
+                ],
+            )
         warnings.extend(plan_warnings)
         diagnostics = [
             ValidationDiagnostic(
                 level="not_checked",
                 check="scientific_entailment",
                 message=(
-                    "Quote membership and lexical screening do not validate scientific "
-                    "entailment, customer suitability, or compatibility; expert review required."
+                    "Entailment, scenario binding, transfer, and qualification completeness "
+                    "are model-assessed "
+                    "and require expert review; quote membership alone cannot prove them."
                 ),
                 evidence_ids=[item.evidence_id for item in retrieved],
             ),
@@ -2014,7 +2355,7 @@ def assess_use_case(
             evidence_set_version=version,
             knowledge_index_revision=index_revision,
             retrieved_evidence=retrieved,
-            report_version=f"grounded-{provider}-v1",
+            report_version=f"grounded-{provider}-v2",
             assessment_warnings=warnings,
             validation_diagnostics=diagnostics,
             retrieval_diagnostics=[
@@ -2022,6 +2363,7 @@ def assess_use_case(
                 for item in getattr(source, "retrieval_diagnostics", [])
             ],
             query_diagnostics=query_diagnostics,
+            evidence_assessment=evidence_assessment,
         )
     except (ProviderError, ValueError) as exc:
         raise ProviderError(f"Grounded assessment failed: {exc}") from None

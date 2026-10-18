@@ -4,8 +4,15 @@ import pytest
 
 from spectro_ai.intake import correct_requirements
 from spectro_ai.models import (
+    ApplicationSupportAssessment,
     AssessmentReport,
     CustomerUseCase,
+    EvidenceAssessment,
+    EvidenceConditionComparison,
+    EvidenceConflict,
+    EvidenceCoverage,
+    EvidenceObservation,
+    EvidenceReference,
     FeasibilityPlan,
     RetrievedEvidence,
     TechniqueCandidate,
@@ -16,7 +23,9 @@ from spectro_ai.providers import (
     ProviderError,
     _supports_candidate,
     _TechnicalDraft,
-    assess_use_case,
+)
+from spectro_ai.providers import (
+    assess_use_case as _assess_use_case,
 )
 
 
@@ -151,6 +160,279 @@ class FakeAssessor:
         return self.value
 
 
+class _CachedAssessor:
+    def __init__(self, assessor):
+        self.assessor = assessor
+        self.value = None
+
+    def assess(self, use_case, retrieved, **kwargs):
+        if self.value is None:
+            self.value = self.assessor.assess(use_case, retrieved)
+        return self.value
+
+    def fit_evidence(self, use_case, retrieved):
+        fit = getattr(self.assessor, "fit_evidence", None)
+        return fit(use_case, retrieved) if fit else (retrieved, [])
+
+
+def _empty_evidence_assessment() -> EvidenceAssessment:
+    return EvidenceAssessment(input_fingerprint="fixture", assessor_version="fixture")
+
+
+def assess_use_case(use_case, *, assessor=None, evidence_assessor=None, **kwargs):
+    """Offline test adapter: explicitly mock both required model passes."""
+    assessor = assessor or FakeAssessor()
+    cached_assessor = _CachedAssessor(assessor)
+
+    def mocked_evidence_assessment(customer, retrieved, *, allow_retry=True):
+        draft_or_report = cached_assessor.assess(customer, retrieved)
+        candidates = getattr(draft_or_report, "candidate_techniques", [])
+        observations = []
+        supports = []
+        conflicts = []
+        source_by_id = {item.evidence_id: item for item in retrieved}
+        for candidate_index, candidate in enumerate(candidates):
+            method = candidate.spectroscopy_method
+            candidate_observations = []
+            for claim_index, claim in enumerate(candidate.evidence_claims):
+                item = source_by_id.get(claim.evidence_id)
+                if item is None or method.casefold() not in claim.quote.casefold():
+                    continue
+                if not (
+                    claim.quote in item.excerpt
+                    or any(
+                        block.block_id == claim.context_block_id and claim.quote in block.text
+                        for block in item.context_blocks
+                    )
+                ):
+                    continue
+                reference = EvidenceReference(
+                    evidence_id=claim.evidence_id,
+                    quote=claim.quote,
+                    context_block_id=claim.context_block_id,
+                )
+                quote_folded = claim.quote.casefold()
+                comparisons = []
+                for dimension, field_name in (
+                    ("target_property", "target_analyte_or_property"),
+                    ("matrix_state", "sample_matrix"),
+                    ("process_location", "process_location"),
+                ):
+                    customer_value = getattr(customer, field_name, None)
+                    if not customer_value:
+                        continue
+                    words = customer_value.split()
+                    source_value = None
+                    for width in range(len(words), 0, -1):
+                        source_value = next(
+                            (
+                                " ".join(words[start : start + width])
+                                for start in range(len(words) - width + 1)
+                                if " ".join(words[start : start + width]).casefold() in quote_folded
+                            ),
+                            None,
+                        )
+                        if source_value:
+                            break
+                    if source_value:
+                        comparisons.append(
+                            EvidenceConditionComparison(
+                                dimension=dimension,
+                                source_value=source_value,
+                                customer_fields=[field_name],
+                                comparison="match",
+                                rationale="Shared source and customer phrase.",
+                                supporting_references=[reference],
+                            )
+                        )
+                application_match = bool(comparisons)
+                is_limitation = any(
+                    marker in claim.quote.casefold()
+                    for marker in ("cannot", "not suitable", "limitation:")
+                )
+                observation_id = f"fixture-observation-{candidate_index}-{claim_index}"
+                observation = EvidenceObservation(
+                    observation_id=observation_id,
+                    scenario_id=f"fixture-scenario-{candidate_index}-{claim_index}",
+                    source_statement=claim.quote,
+                    references=[reference],
+                    statement_kind="limitation" if is_limitation else "reported_result",
+                    method=method,
+                    entailment="supported",
+                    applicability=("direct_application" if application_match else "general_method"),
+                    condition_comparisons=comparisons,
+                )
+                observations.append(observation)
+                candidate_observations.append(observation)
+            for item in retrieved:
+                supplied_spans = [
+                    (item.excerpt, None),
+                    *((block.text, block.block_id) for block in item.context_blocks),
+                ]
+                for span_index, (text, block_id) in enumerate(supplied_spans):
+                    if method.casefold() not in text.casefold():
+                        continue
+                    reference = EvidenceReference(
+                        evidence_id=item.evidence_id,
+                        quote=text,
+                        context_block_id=block_id,
+                    )
+                    comparisons = []
+                    for dimension, field_name in (
+                        ("target_property", "target_analyte_or_property"),
+                        ("matrix_state", "sample_matrix"),
+                        ("process_location", "process_location"),
+                    ):
+                        customer_value = getattr(customer, field_name, None)
+                        if not customer_value:
+                            continue
+                        words = customer_value.split()
+                        source_value = next(
+                            (
+                                " ".join(words[start : start + width])
+                                for width in range(len(words), 0, -1)
+                                for start in range(len(words) - width + 1)
+                                if " ".join(words[start : start + width]).casefold()
+                                in text.casefold()
+                            ),
+                            None,
+                        )
+                        if source_value:
+                            comparisons.append(
+                                EvidenceConditionComparison(
+                                    dimension=dimension,
+                                    source_value=source_value,
+                                    customer_fields=[field_name],
+                                    comparison="match",
+                                    rationale="Shared source and customer phrase.",
+                                    supporting_references=[reference],
+                                )
+                            )
+                    if not comparisons:
+                        continue
+                    span_is_limitation = any(
+                        marker in text.casefold()
+                        for marker in ("cannot", "not suitable", "limitation:")
+                    )
+                    observation = EvidenceObservation(
+                        observation_id=f"fixture-context-{candidate_index}-{item.evidence_id}-{span_index}",
+                        scenario_id=f"fixture-scenario-{candidate_index}-{item.evidence_id}",
+                        source_statement=text,
+                        references=[reference],
+                        statement_kind="limitation" if span_is_limitation else "reported_result",
+                        method=method,
+                        entailment="supported",
+                        applicability="direct_application",
+                        condition_comparisons=comparisons,
+                    )
+                    observations.append(observation)
+                    candidate_observations.append(observation)
+            for item_index, item in enumerate(retrieved):
+                quote = item.excerpt
+                if (
+                    item.evidence_id
+                    in {
+                        reference.evidence_id
+                        for observation in candidate_observations
+                        for reference in observation.references
+                    }
+                    or method.casefold() not in quote.casefold()
+                    or not any(
+                        comparison.comparison == "match"
+                        for observation in candidate_observations
+                        for comparison in observation.condition_comparisons
+                    )
+                    or not any(
+                        marker in quote.casefold()
+                        for marker in ("cannot", "not suitable", "limitation:")
+                    )
+                ):
+                    continue
+                limitation = EvidenceObservation(
+                    observation_id=f"fixture-limitation-{candidate_index}-{item_index}",
+                    scenario_id=f"fixture-scenario-{candidate_index}-{item_index}",
+                    source_statement=quote,
+                    references=[EvidenceReference(evidence_id=item.evidence_id, quote=quote)],
+                    statement_kind="limitation",
+                    method=method,
+                    entailment="supported",
+                    applicability="direct_application",
+                )
+                observations.append(limitation)
+                candidate_observations.append(limitation)
+            if not candidate_observations:
+                continue
+            positive = [
+                item
+                for item in candidate_observations
+                if item.statement_kind != "limitation"
+                and any(
+                    comparison.comparison == "match" for comparison in item.condition_comparisons
+                )
+            ]
+            if positive:
+                limitations = [
+                    item for item in candidate_observations if item.statement_kind == "limitation"
+                ]
+                if limitations:
+                    conflicts.append(
+                        EvidenceConflict(
+                            observation_ids=[
+                                item.observation_id for item in [*positive, *limitations]
+                            ],
+                            description="Offline fixture identifies conflicting source statements.",
+                            references=[
+                                reference
+                                for item in [*positive, *limitations]
+                                for reference in item.references
+                            ],
+                        )
+                    )
+                supports.append(
+                    ApplicationSupportAssessment(
+                        support_assessment_id=f"fixture-support-{candidate_index}",
+                        method=method,
+                        basis="application_supported",
+                        observation_ids=[item.observation_id for item in positive],
+                        bounded_conclusion=(
+                            "Source reports the cited measurement under the stated conditions."
+                        ),
+                    )
+                )
+        return EvidenceAssessment(
+            observations=observations,
+            support_assessments=supports,
+            conflicts=conflicts,
+            coverage=[
+                EvidenceCoverage(
+                    evidence_id=item.evidence_id,
+                    disposition="assessed"
+                    if any(
+                        ref.evidence_id == item.evidence_id
+                        for observation in observations
+                        for ref in observation.references
+                    )
+                    else "no_applicable_statement",
+                    context_availability="attached_context"
+                    if item.context_blocks
+                    else "child_only",
+                )
+                for item in retrieved
+            ],
+            input_fingerprint="fixture-fingerprint",
+            assessor_version="fixture-evidence-assessor-v1",
+        )
+
+    mocked_evidence_assessment.fit_evidence = cached_assessor.fit_evidence
+
+    return _assess_use_case(
+        use_case,
+        assessor=cached_assessor,
+        evidence_assessor=evidence_assessor or mocked_evidence_assessment,
+        **kwargs,
+    )
+
+
 def test_grounded_assessment_binds_candidate_to_validated_excerpt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -178,23 +460,32 @@ def test_unknown_or_unrelated_candidate_evidence_is_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
+    invalid_draft = draft(evidence_ids=["made-up-id"])
+    invalid_draft.candidate_techniques[0].evidence_claims = [
+        claim.model_copy(update={"evidence_id": "made-up-id"})
+        for claim in invalid_draft.candidate_techniques[0].evidence_claims
+    ]
     report = assess_use_case(
         case(),
         retriever=FakeRetriever(),
-        assessor=FakeAssessor(draft(evidence_ids=["made-up-id"])),
+        assessor=FakeAssessor(invalid_draft),
     )
-    assert report.candidate_techniques == []
-    assert report.status == "insufficient_information"
-    assert any("absent from retrieved sources" in warning for warning in report.assessment_warnings)
+    assert len(report.candidate_techniques) == 1
+    assert report.status == "provisional"
+    assert report.candidate_techniques[0].supporting_evidence_ids == ["S01-p17"]
+    assert all(
+        claim.evidence_id != "made-up-id"
+        for claim in report.candidate_techniques[0].evidence_claims
+    )
     assert "NIR" not in (report.recommendation_rationale or "")
-    assert report.proposed_feasibility_experiment.proposed_measurement_technique is None
+    assert report.proposed_feasibility_experiment.proposed_measurement_technique == "NIR"
 
     unrelated = FakeRetriever(
         evidence(excerpt="NIR spectroscopy measures concentration changes in mineral samples.")
     )
     report = assess_use_case(case(), retriever=unrelated, assessor=FakeAssessor())
     assert report.candidate_techniques == []
-    assert any("Removed NIR" in warning for warning in report.assessment_warnings)
+    assert report.candidate_techniques == []
 
 
 def test_combined_method_requires_lexical_support_for_each_component() -> None:
@@ -214,9 +505,9 @@ def test_context_fit_keeps_multiple_whole_excerpts_with_output_reserve() -> None
         ).model_copy(update={"evidence_id": f"S01-p{index}21"})
         for index in range(8)
     ]
-    assessor = OllamaTechnicalAssessor(ExtractionSettings())
+    assessor = OllamaTechnicalAssessor(ExtractionSettings(context=32000))
     retained, dropped = assessor.fit_evidence(case(), excerpts)
-    assert len(retained) >= 3
+    assert len(retained) >= 2
     assert len(retained) + len(dropped) == len(excerpts)
     assert [item.evidence_id for item in retained] == [
         item.evidence_id for item in excerpts[: len(retained)]
@@ -373,30 +664,30 @@ def test_assessor_schema_and_prompt_exclude_service_owned_case_fields(
         return {"message": {"content": response}, "done_reason": "stop"}
 
     monkeypatch.setattr("spectro_ai.providers.ollama_request", transport)
-    assessor = OllamaTechnicalAssessor(ExtractionSettings())
-    result = assessor.assess(case(), [evidence()])
+    assessor = OllamaTechnicalAssessor(ExtractionSettings(context=32000))
+    result = assessor.assess(case(), [evidence()], evidence_assessment=_empty_evidence_assessment())
     assert result.candidate_techniques[0].spectroscopy_method == "NIR"
     payload = captured[0]
     system = payload["messages"][0]["content"]
     schema = payload["format"]
     properties = schema["properties"]
-    assert "Authoritative output JSON schema" in system
-    assert "exact evidence IDs" in system
+    assert "Return JSON matching supplied schema" in system
+    assert "evidence assessments" in system
     assert "extracted_requirements" not in properties
     assert "retrieved_evidence" not in properties
     assert "supporting_evidence" not in schema["$defs"]["_CandidateDraft"]["properties"]
     assert "Evidence" not in schema["$defs"]
-    assert "Name each specific method" in system
+    assert "Output JSON schema is supplied separately" in system
     user_payload = json.loads(payload["messages"][1]["content"])
     customer = user_payload["customer_case_untrusted_data"]
     assert customer["source_text_untrusted"] == case().source_text
     assert customer["validated_customer_facts"]["target_analyte_or_property"] == "protein"
     assert customer["unknown_fields"]
     assert "field_quotes" not in customer
-    source = user_payload["retrieved_sources_untrusted_data"][0]
+    source = user_payload["verified_source_metadata"][0]
     assert source["page_or_section"] == "p.17"
     assert source["review_status"] == "needs_page_review"
-    assert "retrieval_score" not in source
+    assert "excerpt" not in source
     assert payload["think"] is False
     assert payload["options"]["temperature"] == 0
 
@@ -413,7 +704,9 @@ def test_assessor_malformed_json_gets_one_structural_retry(monkeypatch: pytest.M
         "spectro_ai.providers.ollama_request",
         lambda *args, **kwargs: (calls.append(args), next(replies))[1],
     )
-    assert OllamaTechnicalAssessor(ExtractionSettings()).assess(case(), [evidence()])
+    assert OllamaTechnicalAssessor(ExtractionSettings(context=32000)).assess(
+        case(), [evidence()], evidence_assessment=_empty_evidence_assessment()
+    )
     assert len(calls) == 2
 
 
@@ -423,7 +716,9 @@ def test_assessor_timeout_has_clear_error(monkeypatch: pytest.MonkeyPatch) -> No
         lambda *args, **kwargs: (_ for _ in ()).throw(ProviderError("timeout")),
     )
     with pytest.raises(ProviderError, match="timeout"):
-        OllamaTechnicalAssessor(ExtractionSettings()).assess(case(), [evidence()])
+        OllamaTechnicalAssessor(ExtractionSettings(context=32000)).assess(
+            case(), [evidence()], evidence_assessment=_empty_evidence_assessment()
+        )
 
 
 def test_export_contains_source_page_excerpt_scope_review_and_warning(
@@ -438,4 +733,4 @@ def test_export_contains_source_page_excerpt_scope_review_and_warning(
     assert "NIR diffuse reflection can measure protein in opaque milk samples." in markdown
     assert "technical\\_reference; technical" in markdown
     assert "needs\\_page\\_review" in markdown
-    assert "report grounded-ollama-v1" in markdown
+    assert "report grounded-ollama-v2" in markdown

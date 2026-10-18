@@ -1,7 +1,9 @@
 """Domain types; no UI or model-provider dependencies."""
 
+from __future__ import annotations
+
 from datetime import date
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar, Literal, get_args, get_origin
 
 from pydantic import (
     BaseModel,
@@ -37,9 +39,19 @@ class DomainModel(BaseModel):
     def normalize_unknown(cls, value: object, info: ValidationInfo) -> object:
         if info.field_name == "source_text":
             return value
+        if _literal_accepts(cls.model_fields[info.field_name].annotation, value):
+            return value
         if isinstance(value, str) and value.strip().casefold() in UNKNOWN_VALUES:
             return None
         return value
+
+
+def _literal_accepts(annotation: object, value: object) -> bool:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal and value in args:
+        return True
+    return any(_literal_accepts(arg, value) for arg in args if get_args(arg))
 
 
 class SourceLocation(DomainModel):
@@ -234,6 +246,11 @@ class EvidenceClaim(DomainModel):
     evidence_id: str
     quote: str
     context_block_id: str | None = None
+    observation_id: str | None = None
+    support_assessment_id: str | None = None
+    claim_use: (
+        Literal["source_observation", "application_implication", "exploratory_hypothesis"] | None
+    ) = None
 
 
 class TechniqueCandidate(DomainModel):
@@ -247,6 +264,10 @@ class TechniqueCandidate(DomainModel):
     supporting_evidence: list[Evidence] = Field(default_factory=list)
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     evidence_claims: list[EvidenceClaim] = Field(default_factory=list)
+    support_assessment_id: str | None = None
+    consideration_basis: (
+        Literal["application_supported", "reasoned_exploratory", "unsupported"] | None
+    ) = None
     preliminary_suitability_assessment: Literal["provisional_candidate", "undetermined"] = (
         "undetermined"
     )
@@ -335,6 +356,111 @@ class QueryDiagnostics(DomainModel):
     question_evidence: dict[str, list[str]] = Field(default_factory=dict)
 
 
+EvidenceDimension = Literal[
+    "method_geometry",
+    "target_property",
+    "matrix_state",
+    "process_location",
+    "operating_conditions",
+    "interference",
+    "outcome",
+    "validation",
+]
+EvidenceContextAvailability = Literal["child_only", "attached_context", "unavailable"]
+
+
+class EvidenceReference(DomainModel):
+    evidence_id: str
+    quote: str
+    context_block_id: str | None = None
+
+
+class EvidenceConditionComparison(DomainModel):
+    dimension: EvidenceDimension
+    source_value: str | None = None
+    customer_fields: list[str] = Field(default_factory=list)
+    comparison: Literal["match", "different", "unknown", "conflicting"]
+    rationale: str
+    supporting_references: list[EvidenceReference] = Field(default_factory=list)
+
+
+class EvidenceObservation(DomainModel):
+    observation_id: str
+    scenario_id: str
+    source_statement: str
+    references: list[EvidenceReference] = Field(default_factory=list)
+    statement_kind: Literal[
+        "reported_result", "proposed_capability", "method_description", "limitation"
+    ]
+    method: str | None = None
+    geometry: str | None = None
+    condition_comparisons: list[EvidenceConditionComparison] = Field(default_factory=list)
+    entailment: Literal["supported", "unsupported", "uncertain"]
+    applicability: Literal[
+        "direct_application", "related_application", "general_method", "insufficient_context"
+    ]
+    transfer_limitations: list[str] = Field(default_factory=list)
+    context_availability: EvidenceContextAvailability = "unavailable"
+
+
+class ExploratoryBridge(DomainModel):
+    source_premises: list[EvidenceReference] = Field(default_factory=list)
+    customer_fields: list[str] = Field(default_factory=list)
+    hypothesis: str
+    inference: str
+    application_differences: list[str] = Field(default_factory=list)
+    unknown_gaps: list[str] = Field(default_factory=list)
+    possible_failure_mechanisms: list[str] = Field(default_factory=list)
+    checks: list[str] = Field(default_factory=list)
+
+
+class ApplicationSupportAssessment(DomainModel):
+    support_assessment_id: str
+    method: str
+    basis: Literal["application_supported", "reasoned_exploratory", "unsupported"]
+    observation_ids: list[str] = Field(default_factory=list)
+    bounded_conclusion: str
+    exploratory_bridge: ExploratoryBridge | None = None
+    rejection_reason: str | None = None
+
+
+class EvidenceConflict(DomainModel):
+    observation_ids: list[str] = Field(min_length=2)
+    description: str
+    references: list[EvidenceReference] = Field(default_factory=list)
+
+
+class EvidenceCoverage(DomainModel):
+    evidence_id: str
+    disposition: Literal["assessed", "insufficient_context", "no_applicable_statement"]
+    context_availability: EvidenceContextAvailability
+    omissions: list[str] = Field(default_factory=list)
+
+
+class EvidenceAssessmentDiagnostics(DomainModel):
+    status: Literal["complete", "partial", "failed"] = "complete"
+    warnings: list[str] = Field(default_factory=list)
+    dropped_evidence_ids: list[str] = Field(default_factory=list)
+    call_count: int = 1
+    elapsed_ms: float | None = None
+    serialized_bytes: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+
+class EvidenceAssessment(DomainModel):
+    observations: list[EvidenceObservation] = Field(default_factory=list)
+    support_assessments: list[ApplicationSupportAssessment] = Field(default_factory=list)
+    conflicts: list[EvidenceConflict] = Field(default_factory=list)
+    coverage: list[EvidenceCoverage] = Field(default_factory=list)
+    input_fingerprint: str
+    assessor_version: str
+    model_identity: str | None = None
+    diagnostics: EvidenceAssessmentDiagnostics = Field(
+        default_factory=EvidenceAssessmentDiagnostics
+    )
+
+
 class ValidationDiagnostic(DomainModel):
     level: Literal["error", "warning", "not_checked"]
     check: str
@@ -364,3 +490,4 @@ class AssessmentReport(DomainModel):
     validation_diagnostics: list[ValidationDiagnostic] = Field(default_factory=list)
     retrieval_diagnostics: list[RetrievalDiagnostic] = Field(default_factory=list)
     query_diagnostics: QueryDiagnostics | None = None
+    evidence_assessment: EvidenceAssessment | None = None

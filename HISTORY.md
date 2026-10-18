@@ -855,3 +855,101 @@ Deviation: M1–M3 were integrated and accepted together because shared typed in
 Implemented pinned grouped-baseline, broad-query, grouped-pooling and complementary-query comparisons, preserving legacy output fields. Added Recall@8, reviewed information-need coverage, query overlap, document concentration, per-case token accounting, warm saved-plan timings and whole-process CPU/peak-memory diagnostics. Four new cases are explicitly synthetic; no relevance labels were invented.
 
 Local ten-case BM25/no-reranker benchmark completed: six generated plans used, four insufficient cases skipped generation. All quality metrics remain unavailable. Original M4 task stays in PLAN.md because human relevance labels and demo acceptance are absent. This accepts benchmark software only, not the full milestone. Ignored runtime records: .cache/multi-query/benchmark-bm25.json and smoke.json.
+
+## Completed — 2026-10-18 — Application-aware evidence assessment software (milestones 1–4)
+
+### Exact original task text
+
+## Pending milestones — exact approved text
+
+| Milestone | Acceptance and Conventional Commit |
+|---|---|
+| 1. Contracts and permissions | Models, provenance resolution, context availability, support categories, bridge requirements and compatibility tests. `feat: define application evidence assessment contracts` |
+| 2. Bounded evidence assessment | Prompt, provider adapter, complete-bundle fitting, coverage and failure diagnostics; mocked provider tests. `feat: assess retrieved evidence application context` |
+| 3. Minimal integration guards | Observation-bound presentation, category-preserving candidates, conflict handling, claim repair and experiment bypass prevention. `feat: prevent unsupported evidence promotion` |
+| 4. Semantic regressions and reporting | Generalization fixtures, exports, D01/S02 acceptance procedure and documentation. `test: cover evidence transfer and exploratory reasoning` |
+
+Sol reviews; Luna implements bounded tasks. Run targeted and full pytest, Ruff lint
+and Ruff format checks before acceptance. Commit accepted related work only.
+
+
+### Implementation and Sol review
+
+Added provider-independent typed observations, comparisons, exploratory bridges,
+conflicts, provenance checks and host-bound identities. The configured provider
+assesses complete source bundles before synthesis. Reference schemas constrain source
+IDs, actual context-block IDs and customer fact keys. Unknown conditions remain
+unknown, source review stays separate from applicability, and scientific entailment
+remains model-assessed.
+
+Candidate presentation is projected from validated assessment records rather than
+accepting arbitrary synthesis prose carrying valid IDs. Source quotations, bounded
+application conclusions and engineering hypotheses remain distinct. General method
+descriptions cannot alone authorize application support. A grounded bridge can justify
+novel exploration; unresolved conflicts and unsupported records cannot promote it.
+Exploratory consideration never automatically chooses an experiment technique.
+
+Bounded claim repair stages additions, preserves old bundles, deduplicates attached
+context, assesses the augmented set once and regenerates synthesis once. No recursive
+repair follows. Reports retain assessments and review/context/budget warnings.
+Legacy JSON remains readable; newly assessed reports use provider v2. No index
+migration or new dependency was required. Existing PLAN.md acceptance gates remain.
+
+Sol reviewed the domain permission checks, atomic repair behavior, categorical
+promotion guards, provenance, real-source request fitting, reports and offline
+regressions. Positive S01/context cases retain explicit semantic fixtures; malformed
+IDs, broader generated prose, incompatible conditions, novel bridges and absent
+context have focused regressions. Geometry remains source-described, not confirmed
+customer compatibility.
+
+### Verification
+
+- `.tools/Scripts/uv.exe run --offline pytest -q --basetemp=.cache/pytest-evidence-final-accepted`:
+  **268 passed in 13.02 seconds**, including Streamlit AppTest and four synthetic examples.
+- `.tools/Scripts/uv.exe run --offline ruff check .`: passed.
+- `.tools/Scripts/uv.exe run --offline ruff format --check .`: passed.
+- `.tools/Scripts/uv.exe run --offline python scripts/smoke_check.py`: temporary
+  Streamlit returned **200/ok** and was stopped.
+- Read-only default-budget check: real S01 p.15 chunks of 1,048 and 1,168 bytes each
+  fit individually after schema compaction at context 16,384/output 4,096. This does
+  not establish full-page coverage or scientific correctness.
+
+Tests/loopback smokes ran outside Windows sandbox socket/temp restrictions, with
+repository-local UV_CACHE_DIR. No paid requests were made. Generated test directories
+outside .cache were removed; unrelated README edits and untracked repository guide
+were preserved.
+
+### Runtime and scientific acceptance blocker
+
+Pinned active index `123cdc83ecc9466b8e671afdb00ceda7`, existing schema 2, 197 chunks;
+S02 p.14 source hash is recorded in docs/EVIDENCE_ASSESSMENT.md. Index was not rebuilt.
+Initial request exceeded output-token limit. First focused compact-output repair
+completed in 37.3 seconds but produced malformed references and overinterpreted a
+heading; invalid records were rejected. Second/final focused repair completed in
+16.3 seconds, one request, 11,348 serialized request/schema bytes, 1,050 reported
+prompt tokens and 645 output tokens. The model still omitted the polymer qualification
+and labeled the broad API heading direct_application. The generic method-description
+permission guard withheld its support record. Captured-assessment replay with an
+adversarial synthesis stub produced insufficient information and no experiment
+technique. This establishes enforcement and local runtime, not scientific validity.
+
+**Scientific acceptance remains blocked** after two focused repair attempts. No
+further prompt/model tuning under this request. Human review and a separately reviewed
+approach to source-scenario interpretation are needed. Ignored raw responses/replays:
+`.cache/evidence-assessment-smoke/S02-compact*.json` and `S02-final*.json`. Original
+source text remains in retrieved evidence; no expert usefulness or quality claim is
+accepted. Schema-only compaction afterward has read-only budget verification, not a
+new scientific generation result.
+
+### Deviations and remaining work
+
+The tightly coupled domain/provider/presentation milestones were integrated and
+accepted as one software change after the full gate, rather than publishing partially
+wired source snapshots. Final candidate records are canonical assessment projections;
+this is the minimum robust way to prevent arbitrary synthesis-claim promotion. One
+optional re-synthesis binds repaired evidence to its fresh host IDs and conflicts.
+
+Human scientific acceptance remains pending in PLAN_EVIDENCE_ASSESSMENT.md. Phase 3,
+retrieval labels, parser/context usefulness and demo rehearsal remain open in PLAN.md.
+Ranking and experiment-selection improvements remain Step 2. No challenge, hardware
+or customer-performance facts have been invented or validated.

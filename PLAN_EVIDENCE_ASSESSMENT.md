@@ -122,17 +122,25 @@ Deterministic checks verify membership, identity, linkage and category permissio
 they cannot guarantee semantic entailment, scenario binding, sound transfer,
 complete qualifications or scientific truth. Model judgment stays visibly labeled.
 
-## Pending milestones — exact approved text
+## Software implementation accepted — 2026-10-18
 
-| Milestone | Acceptance and Conventional Commit |
-|---|---|
-| 1. Contracts and permissions | Models, provenance resolution, context availability, support categories, bridge requirements and compatibility tests. `feat: define application evidence assessment contracts` |
-| 2. Bounded evidence assessment | Prompt, provider adapter, complete-bundle fitting, coverage and failure diagnostics; mocked provider tests. `feat: assess retrieved evidence application context` |
-| 3. Minimal integration guards | Observation-bound presentation, category-preserving candidates, conflict handling, claim repair and experiment bypass prevention. `feat: prevent unsupported evidence promotion` |
-| 4. Semantic regressions and reporting | Generalization fixtures, exports, D01/S02 acceptance procedure and documentation. `test: cover evidence transfer and exploratory reasoning` |
+Milestones 1–4 software was reviewed together after 268 tests, Ruff lint/format and
+Streamlit health passed. Exact original milestone text, implementation, checks and
+deviations are preserved in HISTORY.md. No application source task remains pending.
 
-Sol reviews; Luna implements bounded tasks. Run targeted and full pytest, Ruff lint
-and Ruff format checks before acceptance. Commit accepted related work only.
+## Pending scientific acceptance — blocked 2026-10-18
+
+The final pinned S02 local smoke still omits the hot-polymer qualification and labels
+its broad API heading direct_application. The generic method-description guard
+withholds application support and captured-assessment replay leaves experiment
+technique None. This verifies enforcement, not scientific interpretation. After two
+focused repair attempts, stop further prompt/model tuning under this request.
+
+A separately reviewed source-scenario approach and human review of S01/S02 and
+unfamiliar exploratory bridges are required before scientific acceptance. Preserve
+all existing Phase 3, retrieval, parser/context and demo gates in PLAN.md. See
+`docs/EVIDENCE_ASSESSMENT.md` and HISTORY.md for exact runtime evidence and limitations.
+Ranking and experiment-selection improvements remain Step 2.
 
 ## Tests and scientific acceptance
 
