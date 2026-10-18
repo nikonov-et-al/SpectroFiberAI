@@ -551,11 +551,20 @@ class EvidenceRetriever:
         return index
 
     def search(self, use_case: CustomerUseCase, limit: int = 8) -> list[RetrievedEvidence]:
+        return self._search(_query_text(use_case), limit)
+
+    def search_claim(
+        self, use_case: CustomerUseCase, claim: str, limit: int = 4
+    ) -> list[RetrievedEvidence]:
+        """Retrieve source excerpts relevant to one assessment claim."""
+        return self._search(f"{_query_text(use_case)} {claim}", limit)
+
+    def _search(self, query_text: str, limit: int) -> list[RetrievedEvidence]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
         index = self.index_metadata()
         chunks = index.get("chunks", [])
-        query = Counter(_expanded_query(_query_text(use_case)))
+        query = Counter(_expanded_query(query_text))
         if not query or not chunks:
             return []
         corpus = [Counter(_tokens(chunk["text"])) for chunk in chunks]
