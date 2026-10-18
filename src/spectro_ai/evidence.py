@@ -557,7 +557,7 @@ class EvidenceRetriever:
         self, use_case: CustomerUseCase, claim: str, limit: int = 4
     ) -> list[RetrievedEvidence]:
         """Retrieve source excerpts relevant to one assessment claim."""
-        return self._search(f"{_query_text(use_case)} {claim}", limit)
+        return self._search(claim, limit)
 
     def _search(self, query_text: str, limit: int) -> list[RetrievedEvidence]:
         if limit < 1:

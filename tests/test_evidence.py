@@ -286,10 +286,10 @@ def test_claim_search_finds_new_document_and_keeps_citation_provenance(tmp_path:
     results = retriever.search_claim(use_case, "Raman fluorescence background")
 
     assert results
-    assert results[0].source_id == "S02"
-    assert results[0].document_version
-    assert results[0].page_or_section == "lines 1-1"
-    assert "fluorescence" in results[0].excerpt
+    result = next(item for item in results if item.source_id == "S02")
+    assert result.document_version
+    assert result.page_or_section == "lines 1-1"
+    assert "fluorescence" in result.excerpt
 
 
 def test_claim_search_rejects_invalid_citation_provenance(tmp_path: Path) -> None:
