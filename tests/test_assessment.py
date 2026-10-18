@@ -433,7 +433,7 @@ def test_export_contains_source_page_excerpt_scope_review_and_warning(
     report = assess_use_case(case(), retriever=FakeRetriever(), assessor=FakeAssessor())
     from spectro_ai.reporting import render_markdown
 
-    markdown = render_markdown(report)
+    markdown = render_markdown(report, include_diagnostics=True)
     assert "S01 p.17" in markdown
     assert "NIR diffuse reflection can measure protein in opaque milk samples." in markdown
     assert "technical\\_reference; technical" in markdown

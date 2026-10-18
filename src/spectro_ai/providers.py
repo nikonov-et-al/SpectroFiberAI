@@ -14,7 +14,12 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from spectro_ai.evidence import EvidenceRetriever
-from spectro_ai.guardrails import abstention_report, missing_fields, prioritized_questions
+from spectro_ai.guardrails import (
+    abstention_report,
+    missing_fields,
+    prioritized_missing_fields,
+    prioritized_questions,
+)
 from spectro_ai.models import (
     CUSTOMER_FACT_FIELDS,
     AssessmentReport,
@@ -476,7 +481,10 @@ class _CandidateDraft(TechniqueCandidate):
     supporting_evidence: list[Evidence] = Field(default_factory=list, max_length=0)
     evidence_claims: list[EvidenceClaim] = Field(
         default_factory=list,
-        description="Optional source quotations; each must be an exact excerpt substring and carry its supplied ID.",
+        description=(
+            "Optional source quotations; each must be an exact excerpt substring "
+            "and carry its supplied ID."
+        ),
     )
 
 
@@ -832,6 +840,25 @@ def _supports_candidate(
     return has_all_method_components and has_case_match
 
 
+def _candidate_method_named(candidate: TechniqueCandidate, text: str) -> bool:
+    method = candidate.spectroscopy_method.casefold()
+    aliases = []
+    if re.search(r"\bnir\b|near[ -]infrared", method):
+        aliases.append(("nir", "near infrared", "near-infrared"))
+    if "raman" in method:
+        aliases.append(("raman",))
+    if "mir" in method or "ftir" in method or "mid infrared" in method:
+        aliases.append(("mir", "ftir", "mid infrared", "mid-infrared"))
+    if "fluorescence" in method:
+        aliases.append(("fluorescence",))
+    if not aliases:
+        aliases.append((method,))
+    return all(
+        any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text, re.I) for alias in group)
+        for group in aliases
+    )
+
+
 def _abstention_report(
     use_case: CustomerUseCase,
     reason: str,
@@ -881,16 +908,9 @@ def _apply_feasibility_safeguards(
     safe.evaluation_metrics = [
         "Compare held-out results with independent references using customer-agreed measures."
     ]
-    unsafe_configuration = bool(
-        safe.proposed_configuration
-        and re.search(
-            r"\d|customer.{0,20}(?:has|uses|existing|installed|configured)",
-            safe.proposed_configuration,
-            re.I,
-        )
-    )
-    if unsafe_configuration:
-        safe.proposed_configuration = None
+    safe.sample_preparation = None
+    unsafe_configuration = bool(safe.proposed_configuration)
+    safe.proposed_configuration = None
     if safe.proposed_measurement_technique and re.search(
         r"\d", safe.proposed_measurement_technique
     ):
@@ -926,29 +946,27 @@ def _apply_feasibility_safeguards(
             for method in methods
             if not re.search(r"\b(?:and|plus|combined|fusion|multimodal)\b|\+", method, re.I)
         ]
-        combined = [method for method in methods if method not in components]
         safe.proposed_measurement_technique = "; ".join(components or methods)
         safe.experimental_steps = [
-            "Collect representative samples spanning customer-agreed batches, runs, matrix variation, and relevant operating conditions.",
-            "Measure each candidate using the same samples and compare any combined method only as an optional addition to its component methods.",
-            "Obtain independent reference results for the same samples before interpreting spectroscopy measurements.",
-            "Split training and held-out evaluation by independent batch or process run before any preprocessing or model fitting.",
-            "Evaluate held-out results against customer-agreed measures and acceptance criteria; agree criteria before testing.",
+            "Collect representative samples spanning customer-agreed batches, runs, matrix "
+            "variation, and relevant operating conditions.",
+            "Measure each candidate using the same samples; compare combined methods only "
+            "as optional additions to component methods.",
+            "Agree and qualify an independent reference method, including uncertainty "
+            "and alignment to the same samples or process time points.",
+            "Split training and held-out evaluation by independent batch or process run "
+            "before any preprocessing or model fitting.",
+            "Evaluate held-out results against customer-agreed measures and acceptance "
+            "criteria; agree criteria before testing.",
         ]
-        if combined:
-            safe.expected_limitations.append(
-                "Combined measurement is an optional comparison; its added value is unknown."
-            )
     else:
-        safe.experimental_steps = [
-            "Confirm the decision, target, and representative operating conditions before selecting a study.",
-            "Agree suitable independent reference measurements and customer-defined acceptance criteria.",
-        ]
-    if not safe.reference_measurement:
-        safe.reference_measurement = (
-            use_case.reference_measurement
-            or "Independent reference measurement to be agreed before testing."
-        )
+        if not any("independent reference" in step.casefold() for step in safe.experimental_steps):
+            safe.experimental_steps.append(
+                "Agree independent reference measurements before testing."
+            )
+    safe.reference_measurement = use_case.reference_measurement or (
+        "Independent reference measurement to be agreed before testing."
+    )
     safe.success_actions = [
         "Review study results with customer and domain experts before deciding next steps."
     ]
@@ -959,8 +977,14 @@ def _apply_feasibility_safeguards(
         "Source demonstrations do not establish customer or instrument performance; "
         "hardware selection and production integration require separate expert review."
     )
-    if caveat not in safe.expected_limitations:
-        safe.expected_limitations.append(caveat)
+    safe.expected_limitations = [caveat]
+    if candidates and any(
+        re.search(r"\b(?:and|plus|combined|fusion|multimodal)\b|\+", method, re.I)
+        for method in methods
+    ):
+        safe.expected_limitations.append(
+            "Combined measurement is an optional comparison; its added value is unknown."
+        )
     warnings = [
         "Deterministic safeguards replaced acceptance thresholds and constrained study planning; "
         "they are not scientific validation."
@@ -977,7 +1001,7 @@ def _apply_feasibility_safeguards(
         )
     if unsafe_configuration:
         warnings.append(
-            "Removed numerical or asserted customer configuration; compatibility remains unchecked."
+            "Removed unverified proposed configuration; compatibility remains unchecked."
         )
     return safe, warnings
 
@@ -1072,16 +1096,69 @@ def assess_use_case(
         )
         rejected = 0
         relevance_rejected = False
+        conflict_found = False
+        claim_searches = 0
+        searched_claims: set[str] = set()
         for proposed in draft.candidate_techniques:
             if proposed.supporting_evidence:
                 warnings.append(
                     f"Ignored model-generated source objects for {proposed.spectroscopy_method}."
                 )
             citations = list(dict.fromkeys(proposed.supporting_evidence_ids))
+            absent_ids = [evidence_id for evidence_id in citations if evidence_id not in known]
+            if absent_ids:
+                warnings.append(
+                    f"Removed citations absent from retrieved sources for "
+                    f"{proposed.spectroscopy_method}."
+                )
             valid_claims: list[EvidenceClaim] = []
             valid_ids: list[str] = []
             for claim in proposed.evidence_claims:
                 excerpt = known.get(claim.evidence_id)
+                if (
+                    excerpt is not None
+                    and claim.quote
+                    and claim.quote not in excerpt.excerpt
+                    and claim_searches < 4
+                ):
+                    search_claim = getattr(source, "search_claim", None)
+                    query = f'{claim.claim} "{claim.quote}"'
+                    if search_claim is not None and query.casefold() not in searched_claims:
+                        searched_claims.add(query.casefold())
+                        claim_searches += 1
+                        try:
+                            additional = search_claim(
+                                use_case,
+                                query,
+                                limit=4,
+                            )
+                            verified_extra, _ = _verified_retrieval(source, additional)
+                            exact_match = next(
+                                (item for item in verified_extra if claim.quote in item.excerpt),
+                                None,
+                            )
+                            if exact_match is not None:
+                                if exact_match.evidence_id not in known:
+                                    retrieved.append(exact_match)
+                                    known[exact_match.evidence_id] = exact_match
+                                    version = _evidence_set_version(
+                                        retrieved,
+                                        str(initial_metadata["manifest_version"]),
+                                    )
+                                if exact_match.evidence_id not in citations:
+                                    citations.append(exact_match.evidence_id)
+                                claim = claim.model_copy(
+                                    update={"evidence_id": exact_match.evidence_id}
+                                )
+                                excerpt = exact_match
+                                warnings.append(
+                                    "Claim quote verified from additional retrieved evidence."
+                                )
+                        except ProviderError, ValueError:
+                            warnings.append(
+                                "Claim-specific source retrieval failed validation; "
+                                "the claim was not accepted."
+                            )
                 if (
                     claim.evidence_id in citations
                     and excerpt is not None
@@ -1090,7 +1167,7 @@ def assess_use_case(
                 ):
                     valid_claims.append(
                         EvidenceClaim(
-                            claim=f'Source states: “{claim.quote}”',
+                            claim=f"Source states: “{claim.quote}”",
                             evidence_id=claim.evidence_id,
                             quote=claim.quote,
                         )
@@ -1099,30 +1176,28 @@ def assess_use_case(
                         valid_ids.append(claim.evidence_id)
             if len(valid_claims) != len(proposed.evidence_claims):
                 warnings.append(
-                    f"Removed unsupported or invalidly cited claims from {proposed.spectroscopy_method}."
+                    f"Removed unsupported or invalidly cited claims from "
+                    f"{proposed.spectroscopy_method}."
                 )
             negative_claim = re.compile(
                 r"\b(no|not|cannot|can't|unable|limited|limitation|unsuitable|"
                 r"poor|failed|failure|doesn't|does not|without)\b",
                 re.I,
             )
-            positive = [
+            positive = [item for item in valid_claims if not negative_claim.search(item.quote)]
+            eligible_support = [
                 item
-                for item in valid_claims
-                if not negative_claim.search(item.quote)
-                if _supports_candidate(
-                    use_case,
-                    proposed,
-                    [known[item.evidence_id]],
-                )
+                for item in positive
+                if _candidate_method_named(proposed, item.quote)
+                and _supports_candidate(use_case, proposed, [known[item.evidence_id]])
             ]
-            if not positive:
+            if not eligible_support:
                 warnings.append(
                     f"Removed {proposed.spectroscopy_method}: no valid positive source quote "
                     "supports both a named method and the requested case."
                 )
                 rejected += 1
-                relevance_rejected = True
+                relevance_rejected = bool(valid_claims)
                 continue
             supporting = [known[evidence_id] for evidence_id in valid_ids]
             if not _supports_candidate(use_case, proposed, supporting):
@@ -1133,17 +1208,55 @@ def assess_use_case(
                 rejected += 1
                 relevance_rejected = True
                 continue
+            target_terms = re.findall(r"[a-zA-Z]{3,}", use_case.target_analyte_or_property or "")
+            matrix_terms = re.findall(r"[a-zA-Z]{3,}", use_case.sample_matrix or "")
+            negative = re.compile(
+                r"\b(?:cannot|can not|not|no|unable|unsuitable|does not|fails to)\b",
+                re.I,
+            )
+            positive_sources = {item.source_id for item in supporting}
+            conflict = next(
+                (
+                    item
+                    for item in retrieved
+                    if item.source_id not in positive_sources
+                    and any(
+                        negative.search(sentence)
+                        and _candidate_method_named(proposed, sentence)
+                        and any(
+                            re.search(rf"\b{re.escape(term)}\b", sentence, re.I)
+                            for term in target_terms
+                        )
+                        and any(
+                            re.search(rf"\b{re.escape(term)}\b", sentence, re.I)
+                            for term in matrix_terms
+                        )
+                        for sentence in re.split(r"(?<=[.!?])\s+", item.excerpt)
+                    )
+                ),
+                None,
+            )
+            if conflict:
+                conflict_found = True
+                warnings.append(
+                    f"Withheld {proposed.spectroscopy_method}: direct conflicting technical "
+                    f"statement found in {conflict.evidence_id}; expert resolution required."
+                )
+                rejected += 1
+                relevance_rejected = True
+                continue
             candidate_data = proposed.model_dump()
             candidate_data["supporting_evidence"] = []
             candidate_data["advantages"] = [item.claim for item in positive]
             candidate_data["limitations"] = [
-                item.claim for item in valid_claims if item not in positive
+                item.claim for item in valid_claims if negative_claim.search(item.quote)
             ]
-            candidate_data["evidence_claims"] = [*positive] + [
-                item for item in valid_claims if item not in positive
-            ]
+            candidate_data["evidence_claims"] = valid_claims
             candidate_data["supporting_evidence_ids"] = valid_ids
             candidate_data["rule_rationale"] = None
+            candidate_data["required_assumptions"] = [
+                "Transferability to customer samples and operating conditions is unknown."
+            ]
             source_text = " ".join(item.excerpt.casefold() for item in supporting)
             for field in ("measurement_geometry", "proposed_spectral_region"):
                 value = candidate_data[field]
@@ -1154,14 +1267,20 @@ def assess_use_case(
                         f"{proposed.spectroscopy_method}."
                     )
             config = candidate_data["potential_probe_configuration"]
-            if config and re.search(
-                r"\d|customer.{0,20}(?:has|uses|existing|installed|configured)|"
-                r"is installed|is configured",
-                config,
-                re.IGNORECASE,
+            if config and (
+                config.casefold() not in source_text
+                or re.search(
+                    r"\d|customer.{0,20}(?:has|uses|existing|installed|configured)|"
+                    r"is installed|is configured",
+                    config,
+                    re.IGNORECASE,
+                )
             ):
                 candidate_data["potential_probe_configuration"] = None
-                warnings.append(f"Removed unsupported customer configuration for {proposed.spectroscopy_method}.")
+                warnings.append(
+                    f"Removed unsupported customer configuration for "
+                    f"{proposed.spectroscopy_method}."
+                )
             candidates.append(TechniqueCandidate(**candidate_data))
         if not candidates:
             status = (
@@ -1172,7 +1291,10 @@ def assess_use_case(
             if draft.candidate_techniques:
                 warnings.append("No candidate passed evidence membership and relevance checks.")
             rationale = (
-                "No candidate passed source membership and relevance checks; "
+                "Directly conflicting technical statements require expert resolution "
+                "before technique selection."
+                if conflict_found
+                else "No candidate passed source membership and relevance checks; "
                 "method selection is withheld."
             )
             plan = _abstention_report(
@@ -1236,14 +1358,23 @@ def assess_use_case(
             )
         return AssessmentReport(
             extracted_requirements=use_case,
-            missing_information=missing_fields(use_case),
-            suggested_technical_questions=(
-                draft.suggested_technical_questions or prioritized_questions(use_case)
-            ),
+            missing_information=prioritized_missing_fields(use_case),
+            suggested_technical_questions=prioritized_questions(use_case),
             candidate_techniques=candidates,
             recommendation_rationale=rationale,
             proposed_feasibility_experiment=plan,
-            assumptions_and_uncertainties=draft.assumptions_and_uncertainties,
+            assumptions_and_uncertainties=[
+                "Source results may not transfer to customer samples or operating conditions.",
+                *(
+                    ["Customer-defined acceptance criteria are missing."]
+                    if not (
+                        use_case.required_accuracy
+                        or use_case.detection_limit
+                        or use_case.strict_requirements
+                    )
+                    else []
+                ),
+            ],
             status=status,
             assessment_method=f"{provider}_grounded",
             assessment_provider=provider,

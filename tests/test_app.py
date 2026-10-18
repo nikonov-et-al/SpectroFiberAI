@@ -185,6 +185,14 @@ def test_json_export_and_diagnostics_are_rendered(monkeypatch: pytest.MonkeyPatc
     app.button[1].click().run()
     assert not app.exception
     assert len(app.get("download_button")) == 2
+    assert [tab.label for tab in app.tabs] == [
+        "Assessment",
+        "Technical diagnostics",
+        "Structured report",
+    ]
+    customer_text = "\n".join(item.value for item in app.tabs[0].markdown)
+    assert "scientific_suitability" not in customer_text
+    assert "source-1-page-3" not in customer_text
     assert any("A literal source excerpt." in item.value for item in app.markdown)
     structured = json.loads(app.json[0].value)
     assert structured["validation_diagnostics"][0]["check"] == "scientific_suitability"

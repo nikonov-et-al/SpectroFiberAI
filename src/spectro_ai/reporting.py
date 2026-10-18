@@ -206,8 +206,7 @@ def _customer_markdown(report: AssessmentReport) -> str:
                 page = re.sub(r"\s*\(chunk[^)]*\)", "", source.page_or_section or "")
                 lines += [
                     f"Source: {_safe(source.source_id)} {_safe(page)} · "
-                    f"document version {_safe(source.document_version or 'unspecified')} · "
-                    f"{_safe(source.source_scope)} · {_safe(source.review_status)}",
+                    f"document version {_safe(source.document_version or 'unspecified')}",
                     "",
                     f"> {_safe(claim.quote)}",
                     "",

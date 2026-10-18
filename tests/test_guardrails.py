@@ -7,7 +7,12 @@ def test_abstention_is_neutral_and_missing_facts_are_explicit():
     case = CustomerUseCase(source_text="We need better monitoring.")
     report = abstention_report(case, "Insufficient customer facts.")
     assert report.candidate_techniques == []
-    assert report.missing_information == missing_fields(case)
+    assert set(report.missing_information) == set(missing_fields(case))
+    assert report.missing_information[:3] == [
+        "measurement_objective",
+        "target_analyte_or_property",
+        "sample_matrix",
+    ]
     assert report.assessment_method == "evidence_abstention"
     assert report.assessment_provider is None
 
@@ -33,3 +38,11 @@ def test_reference_is_explicitly_tbd_when_customer_has_none():
         safe.reference_measurement
         == "Independent reference measurement to be agreed before testing."
     )
+
+
+def test_unverified_model_reference_details_are_replaced_by_customer_text():
+    case = CustomerUseCase(reference_measurement="Laboratory checks")
+    safe, _ = _apply_feasibility_safeguards(
+        case, FeasibilityPlan(reference_measurement="Laboratory checks (current standard)")
+    )
+    assert safe.reference_measurement == "Laboratory checks"

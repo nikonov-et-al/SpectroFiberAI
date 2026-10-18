@@ -117,3 +117,12 @@ one challenge-specific workflow with regression coverage.
 
 No challenge dataset, instrument specification, or scientific suitability has been
 validated by adding retrieval. Scanned PDFs and complex tables need another workflow.
+# Assessment refinement — 2026-10-18
+
+Customer view separates exploratory technique assessment from production readiness;
+technical diagnostics retain the validation audit trail. Claim-level validation and
+targeted local retrieval preserve provenance while removing unsupported secondary
+claims. Feasibility plans compare retained techniques with independent references,
+representative variation, held-out evaluation and customer-agreed acceptance criteria.
+These are software safeguards and study-design heuristics, not scientific acceptance.
+Challenge facts, hardware capability and customer performance remain unconfirmed.

@@ -40,6 +40,15 @@ hardware compatibility or customer performance. Source-typical dimensions and li
 are not customer-selected specifications. Customer acceptance thresholds must be
 stated by customer; otherwise TBD. Plans require references and held-out validation.
 
+Validation removes unsupported claims individually and replaces accepted paraphrases
+with attributed literal source observations. A secondary claim failure does not erase
+an otherwise supported exploratory technique. Bounded claim-specific retrieval can
+locate a missing quotation in the same validated corpus; repaired links retain actual
+source/page/version provenance. Lexical support remains a necessary screening check,
+not scientific validation. Production readiness is recorded separately from provisional
+feasibility. Study plans compare retained methods on representative samples and
+independent batch/run holdouts; combined methods remain optional comparisons.
+
 ## Presentation and compatibility
 
 Expert corrections preserve original enquiry and unchanged provenance. Pending edits,
@@ -49,6 +58,11 @@ customer text/facts and evidence before submission. Knowledge updates run only o
 replaces the prior index; failed updates preserve it. Assessments pin one index snapshot,
 record its revision, and the UI invalidates reports after successful index changes.
 Standalone Document Q&A is removed.
+
+Assessment Markdown is customer-facing by default. The Technical diagnostics tab,
+structured JSON and `render_markdown(..., include_diagnostics=True)` expose internal
+warnings, chunk IDs and extraction details. Customer citations still retain source,
+page and document version.
 
 Legacy parser APIs, baseline provider and fallback parameter are intentionally removed.
 Historical artifacts are preserved; no persisted user-data migration is performed.

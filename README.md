@@ -159,3 +159,16 @@ See [architecture](docs/ARCHITECTURE.md), [decisions](docs/DECISIONS.md),
 [hackathon plan](docs/HACKATHON_PLAN.md), and [pending backlog](PLAN.md).
 
 Current local run: [31-case LLM evaluation](docs/LLM_EVALUATION.md).
+
+Assessment presents a customer report and a separate Technical diagnostics tab.
+Markdown downloads contain the customer report; structured JSON retains the audit
+trail. Python callers can use `render_markdown(report, include_diagnostics=True)`
+for the full technical export. Source observations retain document/page/version
+references; internal chunk IDs and extraction logs stay in diagnostics.
+
+Claim validation removes unsupported statements individually. Retained source
+observations justify an exploratory comparison only, not customer performance or
+production readiness. Missing specifications become prioritized study questions.
+Claim-specific searches use the same allowlisted, version-checked evidence index;
+additional folder documents enter through Update Knowledge Base with unreviewed metadata;
+curated AFS provenance remains in the manifest.

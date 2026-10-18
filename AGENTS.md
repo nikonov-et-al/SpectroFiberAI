@@ -145,7 +145,7 @@ remaining risks.
 
 ## 4. Commits
 
-- Commit **only when explicitly requested**. Sol owns commits by default; stage only related files, and commit accepted, verified work without unrelated changes.
+- Commit. Sol owns commits by default; stage only related files, and commit accepted, verified work without unrelated changes.
 - Use Conventional Commits: `<type>: <summary>`. Types: `docs`, `chore`, `feat`, `fix`, `refactor`, `test`, `perf`, `build`.
 
 ## 5. Handoff

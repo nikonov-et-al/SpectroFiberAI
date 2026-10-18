@@ -588,3 +588,17 @@ No new dependency, vector service or framework. Initial user edits remain uncomm
 checks cover the combined working tree. Isolated staged tests: 110 passed and three
 pre-existing HEAD failures, each independently confirmed against untouched HEAD.
 No unrelated PLAN.md acceptance gate closed.
+
+## Completed — 2026-10-18 — Assessment claim validation and report separation
+
+### Original task objective
+
+Refine grounded assessment validation so unsupported secondary claims do not erase supported exploratory candidates; improve conflict handling, study planning safeguards, and separate customer report content from technical diagnostics while retaining verified source provenance.
+
+### Implementation and verification
+
+Validated evidence claims individually, optionally searched the same verified knowledge index for exact source quotations, retained source/page/version provenance, and withheld candidates with detected direct cross-source contradictions. Tightened feasibility safeguards and ordered missing information by decision impact. Customer Markdown now omits internal source scope/review diagnostics; JSON and the diagnostics tab retain the audit trail. Added focused regression coverage and documented the approach and limits in `docs/ASSESSMENT_REVIEW.md`.
+
+Verification: `uv run --offline ruff check .` — passed; `uv run --offline ruff format --check .` — passed (49 files); focused `pytest tests/test_claim_validation.py tests/test_assessment.py tests/test_guardrails.py` — 26 passed. Full suite and focused AppTest run stalled at `tests/test_app.py` under the Windows sandbox; AppTest requires execution outside the sandbox. `git diff --check` — passed. No expert scientific acceptance is claimed; original Phase 3 gate remains pending.
+
+Deviation: accepted implementation refinement only; did not remove or rewrite the original Phase 3 task because the documented expert review gate remains open.
