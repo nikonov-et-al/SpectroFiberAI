@@ -1,7 +1,7 @@
 import pytest
 
 from spectro_ai.guardrails import abstention_report
-from spectro_ai.models import CustomerUseCase
+from spectro_ai.models import CustomerUseCase, RetrievalDiagnostic
 from spectro_ai.providers import ProviderError, assess_problem
 from spectro_ai.reporting import render_markdown
 
@@ -47,3 +47,16 @@ def test_customer_report_keeps_internal_logs_in_technical_view() -> None:
     assert "Deterministic validation" not in customer
     assert "chunk-007" in technical
     assert "Internal extraction log" in technical
+
+
+def test_reranker_fallback_diagnostic_stays_in_technical_view() -> None:
+    report = abstention_report(CustomerUseCase(), "Evidence is insufficient.")
+    report.retrieval_diagnostics = [
+        RetrievalDiagnostic(
+            status="fallback", candidate_count=30, failure_reason="model cache missing"
+        )
+    ]
+    assert "model cache missing" not in render_markdown(report)
+    technical = render_markdown(report, include_diagnostics=True)
+    assert "## Retrieval diagnostics" in technical
+    assert "fallback reason: model cache missing" in technical

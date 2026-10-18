@@ -602,3 +602,57 @@ Validated evidence claims individually, optionally searched the same verified kn
 Verification: `uv run --offline ruff check .` — passed; `uv run --offline ruff format --check .` — passed (49 files); focused `pytest tests/test_claim_validation.py tests/test_assessment.py tests/test_guardrails.py` — 26 passed. Full suite and focused AppTest run stalled at `tests/test_app.py` under the Windows sandbox; AppTest requires execution outside the sandbox. `git diff --check` — passed. No expert scientific acceptance is claimed; original Phase 3 gate remains pending.
 
 Deviation: accepted implementation refinement only; did not remove or rewrite the original Phase 3 task because the documented expert review gate remains open.
+
+## Completed — 2026-10-18 — Optional local reranker
+
+### Exact original task text
+
+- Verify Python 3.14 CPU runtime and add an optional, cached local cross-encoder adapter with explicit model setup.
+- Integrate opt-in reranking after fusion, preserve default retrieval, and expose snapshot-scoped report/UI diagnostics with visible RRF fallback.
+- Add a reproducible retrieval benchmark with provisional fixtures, human-reviewed version-bound labels, and offline regression coverage.
+- Document setup and scientific limits; run full acceptance checks and a separate real-model smoke; commit verified work.
+
+### Implementation
+
+Added the optional `rerank` extra and uv lock resolution, explicit model setup CLI,
+lazy cached-only CPU assessment scoring, bounded query/passage token inputs and
+validated scalar scores. Existing default retrieval remains unchanged; opt-in
+retrieval reranks 30 fused distinct candidates before final byte/count selection.
+Added nullable relevance scores, snapshot-scoped diagnostic histories, technical
+Markdown/JSON output and configuration-driven Streamlit report invalidation.
+
+The retrieval-only benchmark compares original retrieval, widened RRF and reranking
+on one pinned index, records model/index identities and mode timings, and rejects
+unreviewed or stale relevance labels. Six provisional questions cover the four
+synthetic scenarios, limitations and irrelevant evidence; no relevance labels or
+quality gains were invented. Setup, architectural decisions, limits and hackathon
+strategy are documented. Source documents and index schema are unchanged.
+
+### Verification
+
+- `uv lock` and `uv sync --extra rag --extra llm --extra rerank` succeeded.
+- `uv run pytest --basetemp=.cache/pytest-final` — 150 passed, including 10 AppTests.
+- `uv run ruff check .` — passed.
+- `uv run ruff format --check .` — passed, 52 files already formatted.
+- `git diff --check` — passed.
+- Python 3.14.4, sentence-transformers 5.7.0 and torch 2.14.1+cpu: explicit model
+  download and fresh-process finite CPU inference succeeded. Resolved model
+  revision: `233902d25c440f23af6f7d6e94d2946bac0bee0a`.
+- Fresh-process production retrieval with Hugging Face/Transformers offline flags
+  returned 8 scored excerpts from 30 candidates and an applied diagnostic; a
+  deliberately unavailable model returned 8 unscored excerpts with visible fallback.
+- Cached-model BM25 and real Ollama hybrid corpus benchmark smokes completed.
+  Hybrid run used index `123cdc83ecc9466b8e671afdb00ceda7` (197 chunks), six queries
+  and one warm repetition each: means 1.90 s original, 1.73 s widened RRF, 2.50 s
+  reranked; first model load plus scoring 7.54 s. Results remain ignored in
+  `.cache/retrieval-benchmark-hybrid.json`; relevance metrics are null pending review.
+
+### Deviations and remaining gates
+
+Runtime dependency downloads and Streamlit tests required execution outside the
+Windows sandbox; the sandbox blocked DNS, default cache/temp writes and asyncio's
+local socket pair. Repo-local uv cache and test temp directories were used. These
+were environment restrictions, not application regressions. No paid model calls
+were made. Cold timing includes scoring rather than claiming isolated model-load
+latency. Human relevance labels, default promotion, scientific acceptance and the
+existing Phase 3–5 expert/demo gates remain pending; no implementation task is blocked.

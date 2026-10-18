@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "status": "provisional_unreviewed",
+  "description": "Queries only. Relevance labels must be human reviewed and bound to source version and evidence identity before metrics are computed.",
+  "cases": [
+    {"id": "food_moisture", "query": "We want to measure moisture in food powder. Industry: food processing. Concentration range: 2-15 % mass fraction. Temperature: 20-30 C. State: powder. Laboratory screening before process installation.", "relevant": []},
+    {"id": "polymer_identity", "query": "We want to identify polymers in polymer pellets. Industry: plastics recycling. Objective: identify molecular composition. Target: polymer identity. Matrix: polymer pellets. State: solid. Begin with offline samples.", "relevant": []},
+    {"id": "fluorescent_dye", "query": "We want to quantify fluorescent dye in water. Industry: water process research. Objective: measure fluorescence. Target: fluorescent dye. Matrix: water. Concentration range unknown. Accuracy TBD.", "relevant": []},
+    {"id": "underspecified", "query": "We need better industrial monitoring. What sensor should we use?", "relevant": []},
+    {"id": "limitations", "query": "What limitations and uncertainty should we consider when selecting a spectroscopy method for process monitoring?", "relevant": []},
+    {"id": "irrelevant", "query": "What is the capital of France?", "relevant": []}
+  ]
+}

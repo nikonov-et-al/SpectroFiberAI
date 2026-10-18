@@ -65,6 +65,16 @@ def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = Fal
                 f"- **{_safe(item.level)} · {_safe(item.check)}:** "
                 f"{_safe(item.message)}{_safe(references)}"
             )
+    retrieval = getattr(report, "retrieval_diagnostics", [])
+    if retrieval:
+        lines += ["", "## Retrieval diagnostics", ""]
+        for item in retrieval:
+            detail = f"{item.status}; {item.candidate_count} candidates; {item.elapsed_ms:.1f} ms"
+            if item.model_revision:
+                detail += f"; model revision {item.model_revision}"
+            if item.failure_reason:
+                detail += f"; fallback reason: {item.failure_reason}"
+            lines.append(f"- {_safe(detail)}")
     lines += ["", "## Original customer text", ""]
     source = case.source_text or "No input supplied."
     # A longer fence safely contains arbitrary customer backticks.

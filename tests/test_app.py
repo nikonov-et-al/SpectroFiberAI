@@ -98,6 +98,19 @@ def test_blank_input_and_stale_report_behavior(monkeypatch: pytest.MonkeyPatch) 
     assert not app.get("download_button")
 
 
+def test_reranker_configuration_change_invalidates_cached_report(monkeypatch):
+    monkeypatch.setenv("SPECTRO_RAG_RERANKER", "none")
+    monkeypatch.setattr(providers, "assess_problem", lambda text, **kwargs: _abstention(text))
+    app = AppTest.from_file(str(APP)).run()
+    app.text_area[0].input("We measure moisture in flour.").run()
+    app.button[1].click().run()
+    assert len(app.get("download_button")) == 2
+    monkeypatch.setenv("SPECTRO_RAG_RERANKER", "cross_encoder")
+    app.run()
+    assert not app.get("download_button")
+    assert any("settings changed" in item.value.lower() for item in app.info)
+
+
 def test_provider_error_clears_report_and_openai_warns_before_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -877,16 +877,46 @@ class EvidenceRetriever:
         return index
 
     def search(self, use_case: CustomerUseCase, limit: int = 8) -> list[RetrievedEvidence]:
-        return self._search_many(_query_groups(use_case), limit)
+        self.retrieval_diagnostics: list[dict[str, Any]] = []
+        return self._search_many(
+            _query_groups(use_case),
+            limit,
+            rerank_query=_query_text(use_case),
+            diagnostics=self.retrieval_diagnostics,
+        )
 
     def search_claim(
         self, use_case: CustomerUseCase, claim: str, limit: int = 4
     ) -> list[RetrievedEvidence]:
         """Retrieve source excerpts relevant to one assessment claim."""
-        return self._search_many(_query_groups(use_case, claim), limit)
+        self.retrieval_diagnostics = []
+        return self._search_many(
+            _query_groups(use_case, claim),
+            limit,
+            rerank_query=f"{claim}\n{_query_text(use_case)}",
+            diagnostics=self.retrieval_diagnostics,
+        )
+
+    def search_candidates(
+        self, use_case: CustomerUseCase, limit: int = 30
+    ) -> list[RetrievedEvidence]:
+        """Return fused unique candidates before final excerpt and byte limits."""
+        return self._search_many(_query_groups(use_case), limit, candidate_mode=True)
+
+    def search_claim_candidates(
+        self, use_case: CustomerUseCase, claim: str, limit: int = 30
+    ) -> list[RetrievedEvidence]:
+        return self._search_many(_query_groups(use_case, claim), limit, candidate_mode=True)
 
     def _search_many(
-        self, queries: list[str], limit: int, pinned_index: dict[str, Any] | None = None
+        self,
+        queries: list[str],
+        limit: int,
+        pinned_index: dict[str, Any] | None = None,
+        *,
+        candidate_mode: bool = False,
+        rerank_query: str | None = None,
+        diagnostics: list[dict[str, Any]] | None = None,
     ) -> list[RetrievedEvidence]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
@@ -899,12 +929,84 @@ class EvidenceRetriever:
             if providers.embedding_identity(self.settings) != index.get("embedding_identity"):
                 raise ValueError("Embedding model revision changed; run Update Knowledge Base")
         found: dict[str, tuple[float, RetrievedEvidence]] = {}
-        candidate_limit = max(self.bm25_candidates, self.semantic_candidates, limit)
+        reranking = self.settings.reranker == "cross_encoder" and not candidate_mode
+        candidate_limit = (
+            limit
+            if candidate_mode
+            else (
+                self.settings.reranker_candidates
+                if reranking
+                else max(self.bm25_candidates, self.semantic_candidates, limit)
+            )
+        )
         for query in queries:
-            for rank, hit in enumerate(self._search(query, candidate_limit, index), 1):
+            for rank, hit in enumerate(
+                self._search(
+                    query,
+                    candidate_limit,
+                    index,
+                    apply_context_budget=not (reranking or candidate_mode),
+                ),
+                1,
+            ):
                 score, _ = found.get(hit.evidence_id, (0.0, hit))
                 found[hit.evidence_id] = (score + 1 / (self.rrf_k + rank), hit)
         ranked = sorted(found.values(), key=lambda item: (-item[0], item[1].evidence_id))
+        if candidate_mode:
+            return [
+                hit.model_copy(update={"retrieval_score": score}) for score, hit in ranked[:limit]
+            ]
+        if reranking:
+            from time import perf_counter
+
+            from spectro_ai.providers import ProviderError, rerank_scores
+
+            pool = ranked[:candidate_limit]
+            started = perf_counter()
+            if not pool:
+                if diagnostics is not None:
+                    diagnostics.append({"status": "skipped", "candidate_count": 0})
+                return []
+            try:
+                query_text = rerank_query or "\n".join(queries)
+                scores, revision = rerank_scores(
+                    self.settings, query_text, [hit.excerpt for _, hit in pool]
+                )
+                if len(scores) != len(pool):
+                    raise ValueError("reranker returned wrong score count")
+                ranked = sorted(
+                    (
+                        (
+                            pool[i][0],
+                            hit.model_copy(
+                                update={"retrieval_score": pool[i][0], "rerank_score": scores[i]}
+                            ),
+                        )
+                        for i, (_, hit) in enumerate(pool)
+                    ),
+                    key=lambda item: (-float(item[1].rerank_score), -item[0]),
+                )
+                diagnostic = {
+                    "status": "applied",
+                    "model_revision": revision,
+                    "candidate_count": len(pool),
+                    "elapsed_ms": (perf_counter() - started) * 1000,
+                }
+            except (ProviderError, ValueError, TypeError) as exc:
+                diagnostic = {
+                    "status": "fallback",
+                    "model_revision": self.settings.reranker_revision,
+                    "candidate_count": len(pool),
+                    "elapsed_ms": (perf_counter() - started) * 1000,
+                    "failure_reason": str(exc),
+                }
+                ranked = pool
+            if diagnostics is not None:
+                diagnostics.append(diagnostic)
+            ranked = [(score, hit) for score, hit in ranked]
+        else:
+            if diagnostics is not None:
+                diagnostics.append({"status": "disabled"})
         selected: list[RetrievedEvidence] = []
         used_bytes = 0
         for score, hit in ranked:
@@ -918,7 +1020,12 @@ class EvidenceRetriever:
         return selected
 
     def _search(
-        self, query_text: str, limit: int, pinned_index: dict[str, Any] | None = None
+        self,
+        query_text: str,
+        limit: int,
+        pinned_index: dict[str, Any] | None = None,
+        *,
+        apply_context_budget: bool = True,
     ) -> list[RetrievedEvidence]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
@@ -988,7 +1095,7 @@ class EvidenceRetriever:
         for chunk_number in ordered:
             excerpt = chunks[chunk_number]["text"]
             cost = len(excerpt.encode("utf-8"))
-            if used_bytes + cost > self.context_budget:
+            if apply_context_budget and used_bytes + cost > self.context_budget:
                 continue
             for provenance in chunks[chunk_number]["provenance"][:1]:
                 output.append(
@@ -1106,17 +1213,45 @@ class EvidenceRetriever:
 class _PinnedEvidenceRetriever:
     def __init__(self, retriever: EvidenceRetriever, metadata: dict[str, Any]) -> None:
         self.retriever, self.metadata = retriever, metadata
+        self.retrieval_diagnostics: list[dict[str, Any]] = []
 
     def index_metadata(self) -> dict[str, Any]:
         return self.metadata
 
     def search(self, use_case: CustomerUseCase, limit: int = 8) -> list[RetrievedEvidence]:
-        return self.retriever._search_many(_query_groups(use_case), limit, self.metadata)
+        self.retrieval_diagnostics = []
+        return self.retriever._search_many(
+            _query_groups(use_case),
+            limit,
+            self.metadata,
+            rerank_query=_query_text(use_case),
+            diagnostics=self.retrieval_diagnostics,
+        )
 
     def search_claim(
         self, use_case: CustomerUseCase, claim: str, limit: int = 4
     ) -> list[RetrievedEvidence]:
-        return self.retriever._search_many(_query_groups(use_case, claim), limit, self.metadata)
+        return self.retriever._search_many(
+            _query_groups(use_case, claim),
+            limit,
+            self.metadata,
+            rerank_query=f"{claim}\n{_query_text(use_case)}",
+            diagnostics=self.retrieval_diagnostics,
+        )
+
+    def search_candidates(
+        self, use_case: CustomerUseCase, limit: int = 30
+    ) -> list[RetrievedEvidence]:
+        return self.retriever._search_many(
+            _query_groups(use_case), limit, self.metadata, candidate_mode=True
+        )
+
+    def search_claim_candidates(
+        self, use_case: CustomerUseCase, claim: str, limit: int = 30
+    ) -> list[RetrievedEvidence]:
+        return self.retriever._search_many(
+            _query_groups(use_case, claim), limit, self.metadata, candidate_mode=True
+        )
 
 
 class EvidenceKnowledgeSource(KnowledgeSource):

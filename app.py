@@ -77,6 +77,10 @@ knowledge_config_signature = (
     os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
     os.getenv("SPECTRO_RAG_EVIDENCE_COUNT", "8"),
     os.getenv("SPECTRO_RAG_CONTEXT", "4096"),
+    os.getenv("SPECTRO_RAG_RERANKER", "none"),
+    os.getenv("SPECTRO_RAG_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L6-v2"),
+    os.getenv("SPECTRO_RAG_RERANKER_REVISION", "main"),
+    os.getenv("SPECTRO_RAG_RERANK_CANDIDATES", "30"),
 )
 try:
     retriever = providers.EvidenceRetriever()

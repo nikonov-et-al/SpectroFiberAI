@@ -12,11 +12,18 @@ no paid requests are authorized by merely having a key present.
 
 Offline parser/recommender/fallback removed. Both adapters, shared validation,
 expert corrections, Markdown/JSON export and evaluation runner are implemented.
-119 tests, Ruff lint/format, and local Streamlit HTTP 200/ok passed. A local Ollama
+150 tests and Ruff lint/format passed after optional local reranking was added;
+earlier local Streamlit HTTP 200/ok also passed. A local Ollama
 smoke completed with explicit abstention after unsupported candidates were removed.
 All 31 local evaluation inputs completed without runtime errors; see
 [LLM_EVALUATION.md](docs/LLM_EVALUATION.md). This establishes software behavior, not
 scientific acceptance. Strict quote guards can over-abstain; expert review remains open.
+
+Optional English CPU reranking is implemented and remains disabled by default.
+Explicit model setup, cached inference, visible RRF fallback and retrieval benchmark
+runtime smokes passed. Human relevance labels and any default-promotion decision
+remain pending; no retrieval quality improvement or expert acceptance is claimed.
+Completed implementation tasks and exact original wording are in HISTORY.md.
 
 - OpenAI live smoke remains blocked: OPENAI_MODEL and OPENAI_API_KEY unset.
   Obtain explicit authorization before any paid request.

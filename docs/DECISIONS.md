@@ -2,6 +2,7 @@
 
 | Date | Decision | Reason / revisit trigger |
 | --- | --- | --- |
+| 2026-10-18 | Opt-in CPU cross-encoder reranking after fused retrieval; retain visible RRF fallback | English MiniLM trial changes textual relevance ordering only. Explicit model setup precedes cached-only assessment; optional dependencies do not affect default retrieval. Keep existing citation guards and expert acceptance gates; benchmark labels require human review. |
 | 2026-10-18 | Unify assessment retrieval in one SQLite knowledge base with Ollama embeddings, BM25 and RRF; remove standalone Document Q&A | Reuse stored vectors and provenance, index only on explicit updates, preserve prior index on failure and bind assessments to immutable revisions. Exact cosine scan avoids another service; scientific acceptance remains independent. |
 | 2026-10-18 | Validate source observations individually; separate provisional feasibility from production readiness and customer report from diagnostics | A missing secondary citation must not erase supported exploratory options. Literal source quotations retain provenance; lexical checks do not establish applicability. Candidate comparisons require independent references, held-out evaluation and customer-agreed criteria. |
 | 2026-10-18 | Replace offline parser/recommender/fallback with sole evidence-grounded Ollama/OpenAI pipeline | User-approved architecture supersedes earlier baseline decisions. Keep deterministic guardrails and network-free tests; provider failures are errors, scientific gaps abstain. Expert scientific gate remains open. |

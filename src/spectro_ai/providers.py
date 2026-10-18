@@ -27,6 +27,7 @@ from spectro_ai.models import (
     Evidence,
     EvidenceClaim,
     FeasibilityPlan,
+    RetrievalDiagnostic,
     RetrievedEvidence,
     TechniqueCandidate,
     ValidationDiagnostic,
@@ -44,6 +45,18 @@ class RagSettings:
     context: int = 4096
     evidence_count: int = 8
     index: str = ".cache/rag/index.sqlite3"
+    reranker: str = "none"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    reranker_revision: str = "main"
+    reranker_candidates: int = 30
+
+    def __post_init__(self) -> None:
+        if self.reranker not in {"none", "cross_encoder"}:
+            raise ValueError("reranker must be none or cross_encoder")
+        if not self.reranker_model.strip() or not self.reranker_revision.strip():
+            raise ValueError("reranker model and revision must be nonempty")
+        if self.reranker_candidates < 1:
+            raise ValueError("reranker_candidates must be at least 1")
 
     @classmethod
     def from_env(cls) -> RagSettings:
@@ -58,6 +71,15 @@ class RagSettings:
             raise ProviderError("SPECTRO_RAG_CONTEXT must be at least 1024")
         if evidence_count < 1:
             raise ProviderError("SPECTRO_RAG_EVIDENCE_COUNT must be at least 1")
+        try:
+            reranker_candidates = int(os.getenv("SPECTRO_RAG_RERANK_CANDIDATES", "30"))
+        except ValueError:
+            raise ProviderError("SPECTRO_RAG_RERANK_CANDIDATES must be an integer") from None
+        reranker = os.getenv("SPECTRO_RAG_RERANKER", "none").strip().lower()
+        if reranker not in {"none", "cross_encoder"}:
+            raise ProviderError("SPECTRO_RAG_RERANKER must be none or cross_encoder")
+        if reranker_candidates < 1:
+            raise ProviderError("SPECTRO_RAG_RERANK_CANDIDATES must be at least 1")
         provider = os.getenv("SPECTRO_RAG_PROVIDER", "ollama").strip().lower()
         if provider not in {"ollama", "openai"}:
             raise ProviderError("SPECTRO_RAG_PROVIDER must be ollama or openai")
@@ -69,7 +91,106 @@ class RagSettings:
             context=context,
             evidence_count=evidence_count,
             index=os.getenv("SPECTRO_RAG_INDEX", cls.index),
+            reranker=reranker,
+            reranker_model=os.getenv("SPECTRO_RAG_RERANKER_MODEL", cls.reranker_model),
+            reranker_revision=os.getenv("SPECTRO_RAG_RERANKER_REVISION", cls.reranker_revision),
+            reranker_candidates=reranker_candidates,
         )
+
+
+_RERANKERS: dict[tuple[str, str], object] = {}
+_RERANKER_LOCK = Lock()
+
+
+def _cross_encoder(settings: RagSettings, *, local_files_only: bool = True):
+    key = (settings.reranker_model, settings.reranker_revision)
+    with _RERANKER_LOCK:
+        if key not in _RERANKERS:
+            try:
+                from sentence_transformers import CrossEncoder
+
+                _RERANKERS[key] = CrossEncoder(
+                    settings.reranker_model,
+                    revision=settings.reranker_revision,
+                    device="cpu",
+                    max_length=512,
+                    local_files_only=local_files_only,
+                    trust_remote_code=False,
+                    cache_folder=str(Path(__file__).resolve().parents[2] / ".cache" / "reranker"),
+                )
+            except Exception as exc:
+                raise ProviderError(f"Could not load local reranker: {exc}") from exc
+        return _RERANKERS[key]
+
+
+def _resolved_reranker_revision(settings: RagSettings, model: object) -> str:
+    config = getattr(getattr(model, "model", None), "config", None)
+    revision = getattr(config, "_commit_hash", None)
+    if revision and revision != settings.reranker_revision:
+        return revision
+    reference = (
+        Path(__file__).resolve().parents[2]
+        / ".cache"
+        / "reranker"
+        / f"models--{settings.reranker_model.replace('/', '--')}"
+        / "refs"
+        / settings.reranker_revision
+    )
+    try:
+        return reference.read_text(encoding="utf-8").strip() or settings.reranker_revision
+    except OSError:
+        return settings.reranker_revision
+
+
+def rerank_scores(
+    settings: RagSettings, query: str, passages: list[str]
+) -> tuple[list[float], str | None]:
+    """Score query/passage pairs on CPU; only setup_reranker permits downloads."""
+    if not passages:
+        return [], None
+    try:
+        model = _cross_encoder(settings)
+        tokenizer = model.tokenizer
+        max_length = 512
+        query_ids = tokenizer.encode(query, add_special_tokens=False)[:128]
+        query_text = tokenizer.decode(query_ids)
+        while len(tokenizer.encode(query_text, add_special_tokens=False)) > 128:
+            query_ids = query_ids[:-1]
+            query_text = tokenizer.decode(query_ids)
+        query_ids = tokenizer.encode(query_text, add_special_tokens=False)
+        special = tokenizer.num_special_tokens_to_add(pair=True)
+        budget = max_length - len(query_ids) - special
+        pairs = []
+        for passage in passages:
+            passage_ids = tokenizer.encode(passage, add_special_tokens=False)[:budget]
+            passage_text = tokenizer.decode(passage_ids)
+            while len(tokenizer.encode(passage_text, add_special_tokens=False)) > budget:
+                passage_ids = passage_ids[:-1]
+                passage_text = tokenizer.decode(passage_ids)
+            pairs.append((query_text, passage_text))
+        values = model.predict(pairs, show_progress_bar=False, convert_to_numpy=True)
+        import math
+
+        import numpy as np
+
+        array = np.asarray(values)
+        if array.ndim != 1 or len(array) != len(passages):
+            raise ValueError("reranker must return one scalar score per passage")
+        if any(isinstance(value, (bool, np.bool_)) for value in values):
+            raise ValueError("reranker returned boolean scores")
+        scores = [float(value) for value in array]
+        if any(not math.isfinite(score) for score in scores):
+            raise ValueError("reranker returned invalid score count or non-finite values")
+        return scores, _resolved_reranker_revision(settings, model)
+    except Exception as exc:
+        raise ProviderError(f"Reranker inference failed: {exc}") from exc
+
+
+def setup_reranker(settings: RagSettings | None = None) -> str:
+    """Explicitly download and cache configured model; return resolved revision."""
+    settings = settings or RagSettings.from_env()
+    model = _cross_encoder(settings, local_files_only=False)
+    return _resolved_reranker_revision(settings, model)
 
 
 @dataclass(frozen=True)
@@ -869,6 +990,7 @@ def _abstention_report(
     evidence: list[RetrievedEvidence] | None = None,
     evidence_version: str | None = None,
     knowledge_index_revision: str | None = None,
+    retrieval_diagnostics: list[dict] | None = None,
 ) -> AssessmentReport:
     report = abstention_report(
         use_case,
@@ -880,6 +1002,9 @@ def _abstention_report(
     )
     report.assessment_method = method
     report.knowledge_index_revision = knowledge_index_revision
+    report.retrieval_diagnostics = [
+        RetrievalDiagnostic.model_validate(item) for item in (retrieval_diagnostics or [])
+    ]
     return report
 
 
@@ -1047,6 +1172,7 @@ def assess_use_case(
             source, source.search(use_case, limit=retrieval_limit)
         )
         if not retrieved:
+            retrieval_diagnostics = getattr(source, "retrieval_diagnostics", [])
             return _abstention_report(
                 use_case,
                 "No technical source evidence was retrieved; method selection is "
@@ -1056,6 +1182,7 @@ def assess_use_case(
                 provider=provider,
                 evidence_version=version,
                 knowledge_index_revision=index_revision,
+                retrieval_diagnostics=retrieval_diagnostics,
             )
         selected_assessor = assessor or OllamaTechnicalAssessor()
         dropped_ids: list[str] = []
@@ -1066,6 +1193,7 @@ def assess_use_case(
                 retrieved, str(source.index_metadata()["manifest_version"])
             )
         if not retrieved:
+            retrieval_diagnostics = getattr(source, "retrieval_diagnostics", [])
             report = _abstention_report(
                 use_case,
                 "No retrieved excerpt fits the complete request within the configured "
@@ -1075,6 +1203,7 @@ def assess_use_case(
                 provider=provider,
                 evidence_version=version,
                 knowledge_index_revision=index_revision,
+                retrieval_diagnostics=retrieval_diagnostics,
             )
             report.assessment_warnings.append(
                 f"Dropped {len(dropped_ids)} whole excerpts to preserve complete "
@@ -1384,6 +1513,10 @@ def assess_use_case(
             report_version=f"grounded-{provider}-v1",
             assessment_warnings=warnings,
             validation_diagnostics=diagnostics,
+            retrieval_diagnostics=[
+                RetrievalDiagnostic.model_validate(item)
+                for item in getattr(source, "retrieval_diagnostics", [])
+            ],
         )
     except (ProviderError, ValueError) as exc:
         raise ProviderError(f"Grounded assessment failed: {exc}") from None
@@ -1403,3 +1536,12 @@ def assess_problem(
     return assess_use_case(
         (extractor or OllamaUseCaseExtractor()).extract(text), retriever=retriever
     )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Spectro-AI provider utilities")
+    parser.add_argument("command", choices=["setup-reranker"])
+    parser.parse_args()
+    print(f"Reranker cached; resolved revision: {setup_reranker()}")

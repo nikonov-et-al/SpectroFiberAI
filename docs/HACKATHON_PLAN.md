@@ -119,6 +119,33 @@ No challenge dataset, instrument specification, or scientific suitability has be
 validated by adding retrieval. Scanned PDFs and complex tables need another workflow.
 # Assessment refinement — 2026-10-18
 
+## Optional reranker trial — 2026-10-18
+
+Add an opt-in English CPU cross-encoder trial after fused retrieval. Default retrieval
+remains unchanged. Enabled searches rank up to 30 distinct candidates before applying
+the existing evidence count and context budget. Model failures retain RRF ordering
+with visible technical diagnostics; embedding and assessment failures remain errors.
+Ranking scores measure textual relevance, not scientific confidence or applicability.
+
+Retrieval benchmarks compare original retrieval, widened RRF and reranking against
+one pinned index. New benchmark questions are provisional and have no invented
+relevance labels. Human review must bind labels to exact evidence/source versions
+before precision, recall or MRR can support a quality claim. Real-model runtime
+verification is separate from network-free software tests. No default promotion,
+scientific acceptance, Phase 3 closure or new challenge facts follow from this work.
+
+Runtime feasibility verified on this Windows host: Python 3.14.4,
+sentence-transformers 5.7.0 and PyTorch 2.14.1+cpu. Explicit setup downloaded the
+trial model; fresh-process CPU inference produced finite scores. Model revision:
+`233902d25c440f23af6f7d6e94d2946bac0bee0a`. This verifies execution only.
+
+Six-query hybrid timing smoke against the existing 197-chunk index also completed:
+one warm repetition per query, mean original retrieval 1.90 s, widened RRF 1.73 s,
+reranked retrieval 2.50 s; first model-load-and-score 7.54 s. This small run is
+runtime evidence, not a stable performance estimate. All relevance metrics remain
+null pending human labels; no quality improvement is claimed. Generated output is
+ignored at `.cache/retrieval-benchmark-hybrid.json`; reproduce with the README CLI.
+
 Customer view separates exploratory technique assessment from production readiness;
 technical diagnostics retain the validation audit trail. Claim-level validation and
 targeted local retrieval preserve provenance while removing unsupported secondary

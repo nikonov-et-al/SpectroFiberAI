@@ -155,6 +155,66 @@ characters of overlap (`SPECTRO_RAG_CHUNK_SIZE`, `SPECTRO_RAG_CHUNK_OVERLAP`). C
 chunking or embedding identity requires an update and prevents unsafe vector reuse.
 These defaults are engineering choices, not measured scientific optima.
 
+### Optional local reranker (English trial)
+
+Default retrieval is unchanged. To try CPU cross-encoder reranking, install the
+optional extra and explicitly download the model before starting the app:
+
+```powershell
+uv sync --extra rag --extra rerank
+uv run python -m spectro_ai.providers setup-reranker
+$env:SPECTRO_RAG_RERANKER = "cross_encoder"
+uv run streamlit run app.py
+```
+
+Local uv bootstrap: replace `uv` with `.tools/Scripts/uv.exe` if needed. In restricted
+environments, set `$env:UV_CACHE_DIR = Join-Path $PWD '.cache/uv'` first.
+Assessment loads cached model files only, with remote code disabled. Model setup
+downloads public weights; no paid inference service is used. The trial model is
+`cross-encoder/ms-marco-MiniLM-L6-v2`, an English MS MARCO passage-ranking model,
+not a validated spectroscopy model. Python 3.14 remains required.
+
+Configure `SPECTRO_RAG_RERANKER_MODEL`, `SPECTRO_RAG_RERANKER_REVISION` (default `main`)
+and `SPECTRO_RAG_RERANK_CANDIDATES` (default 30) as needed; setup records the resolved
+model revision. Use an immutable revision to reproduce trials. Set
+`SPECTRO_RAG_RERANKER=none` to restore default retrieval. No index rebuild is needed.
+
+Enabled retrieval collects candidates before context truncation, combines existing
+query rankings, then reranks the top 30 distinct passages once. Final selection
+retains whole excerpts within existing count and byte budgets. Model inputs use
+at most 512 tokens, including at most 128 query tokens; citations retain original
+full excerpts. `retrieval_score` remains the RRF score; nullable `rerank_score`
+records relevance only. Neither score is scientific confidence.
+
+If the optional model cannot load or score candidates, retrieval uses that candidate
+pool's RRF order and records the reason in Technical diagnostics and JSON. Index,
+embedding and assessment failures remain errors. Customer Markdown omits ranking
+diagnostics. Configuration changes invalidate stale reports and exports.
+
+Retrieval benchmark questions live outside the indexed corpus. Human review must
+bind relevance labels to exact evidence IDs and document versions; unreviewed
+fixtures are provisional and cannot establish quality gains. The benchmark compares
+original retrieval, widened RRF and reranking on one pinned index, with Precision@5,
+Recall@10, MRR, candidate recall and separate model-load/warm-search timings.
+Default promotion and scientific acceptance require separate review.
+
+After model setup, run the cached-model benchmark without generation requests:
+
+```powershell
+uv run python scripts/benchmark_retrieval.py --output .cache/retrieval-benchmark.json
+```
+
+Add `--bm25` to avoid Ollama embeddings and compare lexical retrieval variants;
+this still runs the local reranker. Default warm repetitions: 3. JSON reports
+the first model-load-and-score duration separately from warm timings for each mode.
+No relevance labels ship with `examples/retrieval_benchmark.json`. After reviewing
+every question, set its top-level `status` to `human_reviewed` and populate each
+case's `relevant` list with records containing `evidence_id`, `source_id`,
+`source_version` (indexed `document_version`) and `content_sha256`, copied from the
+pinned index. An empty reviewed list means the reviewer confirmed no relevant
+evidence. Stale or incomplete identities are rejected. Unreviewed precision, recall
+and MRR remain `null`; runtime measurements alone establish no retrieval benefit.
+
 See [architecture](docs/ARCHITECTURE.md), [decisions](docs/DECISIONS.md),
 [hackathon plan](docs/HACKATHON_PLAN.md), and [pending backlog](PLAN.md).
 

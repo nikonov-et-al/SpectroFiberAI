@@ -188,7 +188,16 @@ class RetrievedEvidence(DomainModel):
     excerpt: str
     review_status: str
     retrieval_score: float | None = None
+    rerank_score: float | None = None
     source_scope: str | None = None
+
+
+class RetrievalDiagnostic(DomainModel):
+    status: Literal["disabled", "applied", "fallback", "skipped"] = "disabled"
+    model_revision: str | None = None
+    candidate_count: int = 0
+    elapsed_ms: float = 0
+    failure_reason: str | None = None
 
 
 class ValidationDiagnostic(DomainModel):
@@ -218,3 +227,4 @@ class AssessmentReport(DomainModel):
     report_version: str = "grounded-v1"
     assessment_warnings: list[str] = Field(default_factory=list)
     validation_diagnostics: list[ValidationDiagnostic] = Field(default_factory=list)
+    retrieval_diagnostics: list[RetrievalDiagnostic] = Field(default_factory=list)
