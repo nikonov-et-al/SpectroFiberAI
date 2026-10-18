@@ -11,6 +11,7 @@ from spectro_ai.providers import (
     OpenAIUseCaseExtractor,
     ProviderError,
 )
+from spectro_ai.request_trace import RequestTrace, capture_requests
 
 
 class FakeOpenAI:
@@ -70,17 +71,42 @@ def test_openai_extraction_uses_strict_schema_and_shared_quote_validation(monkey
     assert schema["additionalProperties"] is False
 
 
+def test_openai_trace_matches_dispatched_messages_and_schema(monkeypatch):
+    payload = CustomerUseCase(
+        sample_matrix="flour", field_quotes={"sample_matrix": "flour"}
+    ).model_dump_json()
+    client = FakeOpenAI([choice(payload)])
+    install_client(monkeypatch, client)
+    trace = RequestTrace()
+    with capture_requests(trace):
+        OpenAIUseCaseExtractor(ExtractionSettings(provider="openai", model="gpt-test")).extract(
+            "flour"
+        )
+
+    assert len(trace.requests) == 1
+    assert trace.requests[0]["provider"] == "openai"
+    assert trace.requests[0]["stage"] == "extraction"
+    assert trace.requests[0]["request"] == client.calls[0]
+    assert "test-key" not in repr(trace.requests[0]["request"])
+    assert "Authorization" not in trace.requests[0]["request"]
+
+
 def test_openai_extraction_repairs_malformed_json_once(monkeypatch):
     payload = CustomerUseCase(
         sample_matrix="flour", field_quotes={"sample_matrix": "flour"}
     ).model_dump_json()
     client = FakeOpenAI([choice("not-json"), choice(payload)])
     install_client(monkeypatch, client)
-    case = OpenAIUseCaseExtractor(ExtractionSettings(provider="openai", model="gpt-test")).extract(
-        "flour"
-    )
+    trace = RequestTrace()
+    with capture_requests(trace):
+        case = OpenAIUseCaseExtractor(
+            ExtractionSettings(provider="openai", model="gpt-test")
+        ).extract("flour")
     assert case.sample_matrix == "flour"
     assert len(client.calls) == 2
+    assert [request["attempt"] for request in trace.requests] == [1, 2]
+    assert [request["request"] for request in trace.requests] == client.calls
+    assert trace.requests[0]["request"]["messages"] != trace.requests[1]["request"]["messages"]
 
 
 def test_openai_extraction_does_not_retry_past_context_budget(monkeypatch):

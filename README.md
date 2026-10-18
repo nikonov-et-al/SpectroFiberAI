@@ -56,6 +56,14 @@ whole excerpts to fit context. Structural repair is bounded to one attempt.
 
 ## Review and export
 
+The **Prompts and queries** tab shows the latest run's actual outgoing LLM
+messages, retries, schemas, generation settings, retrieval queries, and source
+excerpts sent after context fitting. Failed attempts remain inspectable. Traces
+stay in browser-session memory, outside Markdown/JSON report exports; new runs
+replace them and changed inputs, settings, or knowledge revisions clear them.
+Prompt text includes the customer enquiry and source excerpts. Credentials and
+embedding requests are excluded.
+
 Enter natural-language enquiry or choose synthetic example. Inspect facts and exact
 customer quotes, missing facts, candidates, evidence, validation diagnostics, and
 feasibility plan. Correct facts in expert-review panel and apply corrections to rerun

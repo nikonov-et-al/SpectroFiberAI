@@ -1,5 +1,54 @@
 # Implementation history
 
+## Completed — 2026-10-18 — Prompts and queries tab
+
+### Original task text
+
+# Prompts and queries tab
+
+## Summary
+Add fourth tab, **Prompts and queries**, showing every LLM request from latest assessment run. Include retries and failed attempts. Preserve existing tabs and report exports.
+
+## Implementation
+- Capture immutable request snapshots immediately before provider dispatch, after prompt rendering and context fitting. Include stage, attempt, provider/model, ordered messages, output schema, and generation settings.
+- Cover extraction, optional retrieval-query generation, evidence assessment, and final assessment. Use session-scoped tracing with guaranteed cleanup; exclude credentials, headers, and embedding requests.
+- Show each request in expandable sections with complete role-labelled prompt text and raw request JSON.
+- For each evidence-bearing request, display source IDs, document versions, locations, excerpts, and attached context taken from that exact request. Sources removed by budget fitting must not appear as sent.
+- Capture actual retrieval queries where executed, including grouped, generated, and follow-up queries. Display separately from LLM messages.
+- Keep trace in Streamlit session memory, outside persisted domain reports. Preserve existing assessment function signatures and report schemas.
+- Keep tab available after failed runs. Replace trace on new assessment or expert-correction run; clear when input, settings, or knowledge revision changes. Show explicit empty state before any request.
+- Update README and hackathon functionality notes; document session-only tracing decision. Preserve unrelated working changes.
+
+## Verification
+- Offline mocked-provider tests compare captured messages and schemas against dispatched requests for Ollama and OpenAI.
+- Cover retries, provider failure, budget-dropped evidence, skipped stages, and isolation between sessions.
+- Streamlit AppTest checks fourth tab, prompt/source rendering, failed-run visibility, and stale-trace clearing.
+- Run `uv run pytest`, `uv run ruff check .`, and `uv run ruff format --check .`.
+- Review and commit only accepted, related changes.
+
+## Defaults
+- Retain latest run only, as selected.
+- Display complete customer text and source excerpts already included in requests; add no disk logging.
+- No new dependencies, live paid calls, retrieval-policy changes, or scientific acceptance claims.
+
+### Implementation and verification
+
+Added ContextVar-scoped, deep-copied transport request snapshots and executed-query
+capture. UI exposes messages, request JSON and exact attached evidence, including
+metadata-only sources in synthesis requests. Failed runs retain attempts; input,
+settings and index changes invalidate traces. Report schemas and exports unchanged.
+Updated README, decision log and hackathon functionality notes.
+
+Verification: `.tools/Scripts/uv.exe run pytest` — 276 passed (14 AppTests);
+`uv run ruff check .` — passed; `uv run ruff format --check .` — 78 files formatted;
+`git diff --check` — passed. Used repository-local UV_CACHE_DIR because sandbox
+cache writes failed; tests ran outside sandbox because Windows asyncio loopback
+socket setup blocked AppTest before app execution. No live provider calls.
+
+Deviations: none in functionality. Before a report exists, only the prompt tab is
+shown; successful reports retain the original three tabs plus the fourth tab.
+No pending PLAN.md milestone was consumed by this separate user-approved task.
+
 ## Completed — 2026-10-16 — Milestone 1
 
 ### Original milestone text

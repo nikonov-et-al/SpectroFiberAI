@@ -9,6 +9,7 @@ from spectro_ai.models import (
     SourceLocation,
 )
 from spectro_ai.providers import ExtractionSettings, OllamaEvidenceAssessor, ProviderError
+from spectro_ai.request_trace import RequestTrace, capture_requests
 
 
 def _case() -> CustomerUseCase:
@@ -124,6 +125,37 @@ def test_fit_drops_low_ranked_full_bundle_atomically() -> None:
     assert retained == [first]
     assert dropped == ["source-2"]
     assert retained[0].context_blocks == first.context_blocks
+
+
+def test_request_snapshot_excludes_budget_dropped_bundle(monkeypatch) -> None:
+    first = _evidence()
+    second = _evidence().model_copy(
+        update={"evidence_id": "source-2", "source_id": "S02", "excerpt": "large " * 100}
+    )
+    probe = OllamaEvidenceAssessor(_settings())
+    sizes = [
+        len(json.dumps(probe._messages(_case(), items), ensure_ascii=False).encode())
+        + len(json.dumps(probe._schema(items)).encode())
+        + probe.settings.output_tokens
+        + 256
+        for items in ([first], [first, second])
+    ]
+    assessor = OllamaEvidenceAssessor(_settings(context=max(sizes[0], (sizes[0] + sizes[1]) // 2)))
+    retained, dropped = assessor.fit_evidence(_case(), [first, second])
+    assert dropped == ["source-2"]
+
+    monkeypatch.setattr(
+        "spectro_ai.providers.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    trace = RequestTrace()
+    with capture_requests(trace), pytest.raises(ProviderError, match="Ollama request failed"):
+        assessor(_case(), retained)
+
+    bundle_json = trace.requests[0]["request"]["messages"][1]["content"]
+    assert json.loads(bundle_json)["evidence_bundles"] == [
+        json.loads(assessor._messages(_case(), [first])[1]["content"])["evidence_bundles"][0]
+    ]
 
 
 def test_structural_retry_is_bounded_and_records_calls(monkeypatch) -> None:

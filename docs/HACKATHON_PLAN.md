@@ -11,6 +11,12 @@ open. Prior counts below are historical.
 
 ## Foundation implemented
 
+The UI adds **Prompts and queries** beside Assessment, Technical diagnostics,
+and Structured report. Latest-run request tracing exposes final prompts, retries,
+retrieval queries and the source excerpts actually sent after context fitting,
+including failed attempts. Traces remain session-only and do not establish source
+relevance or scientific suitability.
+
 Structure-aware ingestion is being delivered in independently verified milestones.
 Schema 3 adds source block/section relationships while retaining schema 2 reading;
 updates remain explicit and atomic. Markdown structure and opt-in local Docling

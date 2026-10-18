@@ -11,6 +11,7 @@ from spectro_ai import providers
 from spectro_ai.intake import EDITABLE_FIELDS, correct_requirements
 from spectro_ai.providers import assess_problem, assess_use_case
 from spectro_ai.reporting import render_markdown
+from spectro_ai.request_trace import RequestTrace, capture_requests
 
 ROOT = Path(__file__).resolve().parent
 EXAMPLES = json.loads((ROOT / "examples" / "scenarios.json").read_text(encoding="utf-8"))
@@ -47,7 +48,14 @@ def _assessment_config() -> tuple[str, str, tuple[str, ...]]:
 
 
 def _clear_assessment(*, clear_review: bool = False) -> None:
-    for key in ("report", "report_input", "report_signature", "correction_error"):
+    for key in (
+        "report",
+        "report_input",
+        "report_signature",
+        "correction_error",
+        "request_trace",
+        "trace_signature",
+    ):
         st.session_state.pop(key, None)
     if clear_review:
         for field in EDITABLE_FIELDS:
@@ -61,6 +69,72 @@ def input_changed() -> None:
 def select_example() -> None:
     st.session_state.problem = EXAMPLE_TEXT.get(st.session_state.example, "")
     _clear_assessment(clear_review=True)
+
+
+def _render_request_trace(trace: RequestTrace | None) -> None:
+    if trace is None or not trace.requests and not trace.queries:
+        st.info("No LLM requests or retrieval queries have been captured yet.")
+        return
+    st.subheader("Retrieval queries")
+    if not trace.queries:
+        st.caption("No retrieval queries were recorded.")
+    for index, item in enumerate(trace.queries, 1):
+        st.markdown(f"**{index}. {item['kind']}**")
+        st.code(item["query"], language="text")
+    st.subheader("LLM requests")
+    for index, item in enumerate(trace.requests, 1):
+        title = (
+            f"{index}. {item['stage']} · attempt {item['attempt']} · "
+            f"{item['provider']}:{item['model']}"
+        )
+        with st.expander(title):
+            request = item["request"]
+            for message in request.get("messages", []):
+                st.markdown(f"**{message.get('role', 'message')}**")
+                st.code(str(message.get("content", "")), language="text")
+            st.json(request)
+            sources = []
+            for message in request.get("messages", []):
+                if message.get("role") != "user":
+                    continue
+                try:
+                    payload = json.loads(message.get("content", ""))
+                except TypeError, json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    sources.extend(
+                        payload.get("retrieved_sources_untrusted_data", [])
+                        or payload.get("evidence_bundles", [])
+                        or payload.get("verified_source_metadata", [])
+                    )
+            st.markdown("**Sources present in this request**")
+            if not sources:
+                st.caption("No source evidence was attached to this request.")
+            else:
+                for source in sources:
+                    locations = ", ".join(
+                        loc.get("locator", "") for loc in source.get("source_locations", [])
+                    )
+                    location = source.get("page_or_section") or locations
+                    st.markdown(
+                        f"**{source.get('source_id', 'unknown source')}** · "
+                        f"{source.get('evidence_id', '')} · "
+                        f"{source.get('document_version', 'unknown version')} · "
+                        f"{location}"
+                    )
+                    if source.get("excerpt"):
+                        st.markdown(source["excerpt"])
+                    for context in source.get("context_blocks", []):
+                        context_locations = ", ".join(
+                            item.get("locator", "") for item in context.get("source_locations", [])
+                        )
+                        st.caption(
+                            "Attached context · same source · "
+                            f"{context.get('block_id', 'context block')} · "
+                            f"{context_locations}"
+                        )
+                        if context.get("text"):
+                            st.markdown(context["text"])
 
 
 provider, model, config_signature = _assessment_config()
@@ -134,6 +208,8 @@ if st.button("Update Knowledge Base", key="update_knowledge_base"):
                 update_status.update(label="Knowledge base updated", state="complete")
             st.session_state.pop("report", None)
             st.session_state.pop("report_signature", None)
+            st.session_state.pop("request_trace", None)
+            st.session_state.pop("trace_signature", None)
             st.session_state.knowledge_update_result = result
             st.rerun()
         except (OSError, RuntimeError, ValueError) as exc:
@@ -173,32 +249,46 @@ problem = st.text_area(
 _, _, current_config_signature = _assessment_config()
 saved_signature = st.session_state.get("report_signature")
 current_signature = (problem, current_config_signature, knowledge_config_signature)
-if saved_signature and saved_signature != current_signature:
-    _clear_assessment(clear_review=True)
-    st.info("Input or provider settings changed. Assess again to refresh the report.")
 current_revision = knowledge_status.get("revision")
-saved_report = st.session_state.get("report")
-if (
-    saved_report is not None
-    and saved_report.knowledge_index_revision
-    and (
-        not knowledge_status.get("ready")
-        or not current_revision
-        or saved_report.knowledge_index_revision != current_revision
-    )
+saved_trace_signature = st.session_state.get("trace_signature")
+if (saved_signature and saved_signature != current_signature) or (
+    saved_trace_signature and saved_trace_signature[0] != current_signature
 ):
     _clear_assessment(clear_review=True)
+    saved_trace_signature = None
+    st.info("Input or provider settings changed. Assess again to refresh the report.")
+if saved_trace_signature and saved_trace_signature[1] != current_revision:
+    _clear_assessment(clear_review=True)
+    saved_trace_signature = None
     st.info("Knowledge base changed. Assess again to refresh the report.")
+saved_report = st.session_state.get("report")
+if (saved_report is not None and saved_report.knowledge_index_revision) or (
+    saved_trace_signature and saved_trace_signature[1]
+):
+    saved_revision = (
+        saved_report.knowledge_index_revision
+        if saved_report is not None and saved_report.knowledge_index_revision
+        else saved_trace_signature[1]
+    )
+    if saved_revision and (
+        not knowledge_status.get("ready")
+        or not current_revision
+        or saved_revision != current_revision
+    ):
+        _clear_assessment(clear_review=True)
+        st.info("Knowledge base changed. Assess again to refresh the report.")
 
 if st.button("Assess use case", type="primary"):
     _clear_assessment()
+    trace = RequestTrace()
     if not problem.strip():
         st.error("Enter a customer problem or choose a synthetic example.")
     else:
         try:
             if retriever is None:
                 raise ValueError("Knowledge base configuration is invalid.")
-            report = assess_problem(problem, retriever=retriever)
+            with capture_requests(trace):
+                report = assess_problem(problem, retriever=retriever)
             latest_revision = retriever.knowledge_status().get("revision")
             if (
                 report.knowledge_index_revision
@@ -208,8 +298,13 @@ if st.button("Assess use case", type="primary"):
             st.session_state.report = report
             st.session_state.report_input = problem
             st.session_state.report_signature = current_signature
+            st.session_state.request_trace = trace
+            st.session_state.trace_signature = (current_signature, latest_revision)
         except ValueError as exc:
-            _clear_assessment()
+            st.session_state.request_trace = trace
+            st.session_state.trace_signature = (current_signature, knowledge_status.get("revision"))
+            for key in ("report", "report_input", "report_signature"):
+                st.session_state.pop(key, None)
             st.error(str(exc))
 
 report = st.session_state.get("report")
@@ -228,10 +323,12 @@ if report is not None:
         changed = pending != report.extracted_requirements
         if st.button("Apply expert corrections"):
             _clear_assessment()
+            trace = RequestTrace()
             try:
                 if retriever is None:
                     raise ValueError("Knowledge base configuration is invalid.")
-                report = assess_use_case(pending, retriever=retriever)
+                with capture_requests(trace):
+                    report = assess_use_case(pending, retriever=retriever)
                 latest_revision = retriever.knowledge_status().get("revision")
                 if (
                     report.knowledge_index_revision
@@ -243,7 +340,14 @@ if report is not None:
                 st.session_state.report = report
                 st.session_state.report_input = problem
                 st.session_state.report_signature = current_signature
+                st.session_state.request_trace = trace
+                st.session_state.trace_signature = (current_signature, latest_revision)
             except ValueError as exc:
+                st.session_state.request_trace = trace
+                st.session_state.trace_signature = (
+                    current_signature,
+                    knowledge_status.get("revision"),
+                )
                 st.session_state.correction_error = str(exc)
             st.rerun()
     if changed:
@@ -268,8 +372,8 @@ if report is not None and st.session_state.get("report_input") == problem and no
         file_name="spectro-ai-assessment.json",
         mime="application/json",
     )
-    report_tab, diagnostics_tab, structured_tab = st.tabs(
-        ["Assessment", "Technical diagnostics", "Structured report"]
+    report_tab, diagnostics_tab, structured_tab, prompts_tab = st.tabs(
+        ["Assessment", "Technical diagnostics", "Structured report", "Prompts and queries"]
     )
     with report_tab:
         st.markdown(markdown)
@@ -305,3 +409,9 @@ if report is not None and st.session_state.get("report_input") == problem and no
                     st.info(message)
     with structured_tab:
         st.json(structured)
+    with prompts_tab:
+        _render_request_trace(st.session_state.get("request_trace"))
+else:
+    prompts_tab = st.tabs(["Prompts and queries"])[0]
+    with prompts_tab:
+        _render_request_trace(st.session_state.get("request_trace"))

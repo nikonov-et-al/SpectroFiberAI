@@ -35,6 +35,7 @@ from spectro_ai.models import (
     SourceSection,
     TechniqueKnowledge,
 )
+from spectro_ai.request_trace import record_query
 from spectro_ai.structure import (
     BlockSpan,
     PackedPassage,
@@ -2047,6 +2048,7 @@ class EvidenceRetriever:
         per_query: list[list[RetrievedEvidence]] = []
         for query in query_list:
             budget = remaining()
+            record_query(query, kind="question retrieval")
             per_query.append(
                 self._search(
                     query,
@@ -2240,6 +2242,7 @@ class EvidenceRetriever:
             )
         )
         for query in queries:
+            record_query(query, kind="retrieval")
             for rank, hit in enumerate(
                 self._search(
                     query,

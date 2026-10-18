@@ -43,6 +43,7 @@ from spectro_ai.models import (
     TechniqueCandidate,
     ValidationDiagnostic,
 )
+from spectro_ai.request_trace import record_request, request_stage
 
 _OLLAMA_LOCK = Lock()
 
@@ -314,6 +315,8 @@ def ollama_request(
             request_timeout = timeout
             if deadline is not None:
                 request_timeout = min(timeout, max(0.001, deadline - monotonic()))
+            if payload is not None and route == "/api/chat":
+                record_request("ollama", str(payload.get("model", settings.model)), payload)
             with urlopen(request, timeout=request_timeout) as response:
                 result = json.load(response)
         finally:
@@ -527,13 +530,14 @@ def generate_evidence_query_plan(
     if settings.provider == "openai":
         from dataclasses import replace
 
-        content = _openai_json(
-            replace(settings, timeout=timeout, output_tokens=768),
-            messages,
-            query_schema,
-            usage=usage,
-            temperature=0,
-        )
+        with request_stage("retrieval query generation"):
+            content = _openai_json(
+                replace(settings, timeout=timeout, output_tokens=768),
+                messages,
+                query_schema,
+                usage=usage,
+                temperature=0,
+            )
     else:
         payload = {
             "model": settings.model,
@@ -544,9 +548,10 @@ def generate_evidence_query_plan(
             "options": {"num_ctx": settings.context, "num_predict": 768, "temperature": 0},
         }
         try:
-            result = ollama_request(
-                settings, "/api/chat", payload, timeout=timeout, lock_timeout=timeout
-            )
+            with request_stage("retrieval query generation"):
+                result = ollama_request(
+                    settings, "/api/chat", payload, timeout=timeout, lock_timeout=timeout
+                )
         except TimeoutError as exc:
             raise RetrievalDeadlineExceeded(str(exc)) from None
         message = result.get("message")
@@ -695,6 +700,7 @@ def _openai_json(
             }
             if temperature is not None:
                 options["temperature"] = temperature
+            record_request("openai", settings.model, options)
             response = client.chat.completions.create(**options)
             response_usage = getattr(response, "usage", None)
             if usage is not None and response_usage is not None:
@@ -747,12 +753,13 @@ class OllamaUseCaseExtractor:
             },
         }
         for attempt in range(2):
-            result = ollama_request(
-                self.settings,
-                "/api/chat",
-                payload,
-                timeout=self.settings.timeout,
-            )
+            with request_stage("extraction", attempt + 1):
+                result = ollama_request(
+                    self.settings,
+                    "/api/chat",
+                    payload,
+                    timeout=self.settings.timeout,
+                )
             if result.get("done_reason") == "length":
                 raise ProviderError(
                     "Extraction exceeded output budget. Increase SPECTRO_AI_CONTEXT "
@@ -796,7 +803,8 @@ class OpenAIUseCaseExtractor:
                     f"Extraction {kind} exceeds the configured context budget. "
                     "Increase SPECTRO_AI_CONTEXT or shorten the complete customer text."
                 )
-            raw = _openai_json(settings, messages, _extraction_schema())
+            with request_stage("extraction", attempt + 1):
+                raw = _openai_json(settings, messages, _extraction_schema())
             try:
                 return _clean_extraction(raw, customer_text, "openai")
             except ValidationError, ValueError, TypeError:
@@ -1912,9 +1920,10 @@ def assess_use_case(
             )
             report.assessment_warnings.append(_budget_drop_warning(dropped_ids))
             return report
-        evidence_assessment = EvidenceAssessment.model_validate(
-            selected_evidence_assessor(use_case, retrieved)
-        )
+        with request_stage("evidence assessment"):
+            evidence_assessment = EvidenceAssessment.model_validate(
+                selected_evidence_assessor(use_case, retrieved)
+            )
         evidence_assessment = validate_assessment(
             evidence_assessment,
             use_case,
@@ -1966,9 +1975,10 @@ def assess_use_case(
                     )
             return report
         try:
-            draft = selected_assessor.assess(
-                use_case, retrieved, evidence_assessment=evidence_assessment
-            )
+            with request_stage("final assessment"):
+                draft = selected_assessor.assess(
+                    use_case, retrieved, evidence_assessment=evidence_assessment
+                )
         except ProviderError as exc:
             if "context budget" not in str(exc).casefold():
                 raise
@@ -2066,9 +2076,10 @@ def assess_use_case(
             )
             if preserves_old and len(fitted) > len(old_evidence):
                 try:
-                    augmented = EvidenceAssessment.model_validate(
-                        selected_evidence_assessor(use_case, fitted, allow_retry=False)
-                    )
+                    with request_stage("evidence follow-up"):
+                        augmented = EvidenceAssessment.model_validate(
+                            selected_evidence_assessor(use_case, fitted, allow_retry=False)
+                        )
                     augmented = validate_assessment(
                         augmented,
                         use_case,
@@ -2127,9 +2138,10 @@ def assess_use_case(
                             ),
                         }
                     )
-                    augmented_draft = selected_assessor.assess(
-                        use_case, fitted, evidence_assessment=augmented
-                    )
+                    with request_stage("final assessment follow-up"):
+                        augmented_draft = selected_assessor.assess(
+                            use_case, fitted, evidence_assessment=augmented
+                        )
                     retrieved = fitted
                     evidence_assessment = augmented
                     version = _evidence_set_version(
@@ -2380,9 +2392,9 @@ def assess_problem(
         raise ProviderError("The baseline provider was removed. Use ollama or openai.")
     if provider not in {"ollama", "openai"}:
         raise ProviderError(f"Unsupported provider {provider!r}. Use ollama or openai.")
-    return assess_use_case(
-        (extractor or OllamaUseCaseExtractor()).extract(text), retriever=retriever
-    )
+    with request_stage("extraction"):
+        use_case = (extractor or OllamaUseCaseExtractor()).extract(text)
+    return assess_use_case(use_case, retriever=retriever)
 
 
 if __name__ == "__main__":

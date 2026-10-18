@@ -16,6 +16,7 @@ from spectro_ai.models import (
     TechniqueCandidate,
     ValidationDiagnostic,
 )
+from spectro_ai.request_trace import record_query, record_request
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
 
@@ -74,6 +75,7 @@ def test_four_synthetic_examples_use_injected_assessment(scenarios, monkeypatch)
     monkeypatch.setattr(providers, "assess_problem", assess)
     app = AppTest.from_file(str(APP), default_timeout=15).run()
     assert not app.exception
+    assert [tab.label for tab in app.tabs] == ["Prompts and queries"]
     assert app.title[0].value == "Spectro-AI"
     assert "Evidence-grounded" in app.caption[0].value
     for scenario in scenarios:
@@ -81,6 +83,12 @@ def test_four_synthetic_examples_use_injected_assessment(scenarios, monkeypatch)
         assert app.text_area[0].value == scenario["problem"]
         app.button[1].click().run()
         assert not app.exception
+        assert [tab.label for tab in app.tabs] == [
+            "Assessment",
+            "Technical diagnostics",
+            "Structured report",
+            "Prompts and queries",
+        ]
         assert app.json
         assert app.session_state["report"].candidate_techniques == []
         assert len(app.get("download_button")) == 2
@@ -184,6 +192,14 @@ def test_provider_error_clears_report_and_openai_warns_before_request(
 
     def fail(text: str, *, retriever=None) -> None:
         calls.append(text)
+        record_request(
+            "openai",
+            "test-model",
+            {
+                "messages": [{"role": "user", "content": text}],
+                "response_format": {"type": "json_schema"},
+            },
+        )
         raise ValueError("Synthetic model unavailable")
 
     monkeypatch.setattr(providers, "assess_problem", fail)
@@ -193,9 +209,82 @@ def test_provider_error_clears_report_and_openai_warns_before_request(
     app.button[1].click().run()
     assert not app.exception
     assert "Synthetic model unavailable" in app.error[0].value
-    assert not app.json
+    assert [tab.label for tab in app.tabs] == ["Prompts and queries"]
+    assert (
+        app.session_state["request_trace"].requests[0]["request"]["messages"][0]["content"]
+        == calls[0]
+    )
+    assert any(calls[0] in item.value for item in app.tabs[0].code)
+    assert "report" not in app.session_state
     assert not app.get("download_button")
     assert calls == ["We measure moisture in flour."]
+
+
+def test_prompts_tab_shows_request_queries_and_exact_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _abstention("We measure moisture in flour.")
+
+    def assess(text: str, **kwargs) -> AssessmentReport:
+        request = {
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "SYSTEM PROMPT"},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "retrieved_sources_untrusted_data": [
+                                {
+                                    "source_id": "S01",
+                                    "document_version": "v7",
+                                    "page_or_section": "page 4",
+                                    "source_locations": [{"locator": "p.4"}],
+                                    "excerpt": "literal evidence excerpt",
+                                    "context_blocks": [{"text": "attached context text"}],
+                                }
+                            ]
+                        }
+                    ),
+                },
+            ],
+            "format": {"type": "object"},
+        }
+        record_request("ollama", "test-model", request)
+        record_query("moisture spectroscopy", kind="retrieval")
+        return report
+
+    monkeypatch.setattr(providers, "assess_problem", assess)
+    app = AppTest.from_file(str(APP)).run()
+    app.text_area[0].input("We measure moisture in flour.").run()
+    app.button[1].click().run()
+
+    prompts_tab = app.tabs[3]
+    assert any("S01" in item.value and "v7" in item.value for item in prompts_tab.markdown)
+    assert any("literal evidence excerpt" in item.value for item in prompts_tab.markdown)
+    assert any("attached context text" in item.value for item in prompts_tab.markdown)
+    assert any("SYSTEM PROMPT" in item.value for item in prompts_tab.code)
+    assert any("moisture spectroscopy" in item.value for item in prompts_tab.code)
+
+
+def test_stale_trace_clears_when_input_or_settings_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    def assess(text: str, **kwargs) -> AssessmentReport:
+        record_request("ollama", "test-model", {"messages": [{"role": "user", "content": text}]})
+        return _abstention(text)
+
+    monkeypatch.setattr(providers, "assess_problem", assess)
+    app = AppTest.from_file(str(APP)).run()
+    app.text_area[0].input("We measure moisture in flour.").run()
+    app.button[1].click().run()
+    assert app.session_state["request_trace"].requests
+    app.text_area[0].input("Changed customer input.").run()
+    assert "request_trace" not in app.session_state
+
+    app.button[1].click().run()
+    assert app.session_state["request_trace"].requests
+    monkeypatch.setenv("OLLAMA_MODEL", "new-test-model")
+    app.run()
+    assert "request_trace" not in app.session_state
 
 
 def test_provider_configuration_change_clears_report(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,6 +356,7 @@ def test_json_export_and_diagnostics_are_rendered(monkeypatch: pytest.MonkeyPatc
         "Assessment",
         "Technical diagnostics",
         "Structured report",
+        "Prompts and queries",
     ]
     customer_text = "\n".join(item.value for item in app.tabs[0].markdown)
     assert "scientific_suitability" not in customer_text
@@ -306,7 +396,12 @@ def test_knowledge_update_failure_and_no_automatic_repeat() -> None:
 def test_report_invalidated_when_index_revision_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     report = _abstention("We measure moisture in flour.")
     report.knowledge_index_revision = "revision-1"
-    monkeypatch.setattr(providers, "assess_problem", lambda text, **kwargs: report)
+
+    def assess(text: str, **kwargs) -> AssessmentReport:
+        record_request("ollama", "test-model", {"messages": [{"role": "user", "content": text}]})
+        return report
+
+    monkeypatch.setattr(providers, "assess_problem", assess)
     app = AppTest.from_file(str(APP)).run()
     app.text_area[0].input("We measure moisture in flour.").run()
     app.button[1].click().run()
@@ -315,3 +410,5 @@ def test_report_invalidated_when_index_revision_changes(monkeypatch: pytest.Monk
     app.run()
     assert not app.json
     assert not app.get("download_button")
+    assert "request_trace" not in app.session_state
+    assert any("Knowledge base changed" in item.value for item in app.info)
