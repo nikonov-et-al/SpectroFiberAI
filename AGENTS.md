@@ -4,7 +4,7 @@
   Challenge, data, hardware, and judging requirements remain unconfirmed.
 - Python 3.14; manage dependencies with uv, pyproject.toml, and uv.lock. Keep
   `.tools` (uv bootstrap) separate from `.venv` (project). Never commit secrets.
-- Keep typed Pydantic domain models and deterministic assessment independent of
+- Keep typed Pydantic domain models and deterministic guardrails independent of
   Streamlit and provider code. Prefer small functions; no framework without need.
 - Unknown scalar values are None; missing collections are empty lists. Preserve
   customer units as text. Never invent specifications, limits, citations, or confidence.
@@ -13,7 +13,7 @@
 - Add methods in knowledge/techniques.yaml with provenance; add applicability rules
   only with explicit rationale and tests. New data sources implement KnowledgeSource.
 - Keep model adapters in providers.py. Prompts live in prompts/; outputs must validate
-  against the domain models. Baseline must always work without credentials/network.
+  against the domain models. Assessment requires explicitly configured Ollama or OpenAI; tests must work without credentials/network.
 - After changes run `uv run pytest`, `uv run ruff check .`, and
   `uv run ruff format --check .` (local uv may be under .tools/Scripts).
 - Preserve four synthetic examples, insufficient-information behavior, Markdown

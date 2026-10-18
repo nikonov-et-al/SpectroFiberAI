@@ -1,3 +1,5 @@
+> Historical analysis before 2026-10-18 architecture change. Offline parser/baseline proposals below are superseded; see README, ARCHITECTURE.md and PLAN.md for current behavior.
+
 # Phase 0 — Repository gap analysis
 
 ## Keep

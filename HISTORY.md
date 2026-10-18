@@ -456,3 +456,102 @@ Phase 3 is NOT completed: original task retained in PLAN.md. Initial live D01 as
 Default deterministic baseline, original examples, abstention, exports and AppTest remain green. Optional grounded mode is experimental and not accepted for the demonstration. Scientific/expert review, semantic reliability, Phase 4 evaluation/holdout execution and Phase 5 presentation remain pending; no H outputs generated or modified for this request. No commit requested or made.
 
 Final D02 v3 retains five excerpts, including S01 p.17 reflection and p.18 transmission context, and no invented acceptance threshold survives. It still promotes source-typical 1–10 mm pathlength into a proposed probe configuration without an explicit customer-setup qualification. D01 and D02 therefore require further semantic/expert review; the incomplete case correctly abstains. Final v3 reports/raw captures remain untouched in `.cache/phase3-live-v3`.
+
+## Completed — 2026-10-18 — Replace offline baseline with grounded LLM pipeline (software implementation)
+
+Accepted software change from user-approved plan. Scientific acceptance is **not**
+completed; original phase gates and 2026-10-17 blocker remain in PLAN.md.
+
+### Exact original implementation task text
+
+1. **Remove legacy path; preserve useful checks**
+   - Move missing-field detection, clarification helpers, and neutral abstention construction out of `baseline.py`; then delete baseline module and parser-specific tests.
+   - Remove phrase dictionaries, label parser, deterministic method rankings/configurations, baseline provider branches, and `allow_offline_fallback`.
+   - Keep deterministic schema, provenance, citation, constraint, and feasibility checks. Preserve document ingestion parsers; those serve retrieval.
+
+2. **Complete both provider adapters**
+   - Keep adapters in `providers.py`; reuse existing Ollama extraction/assessment and OpenAI configuration conventions.
+   - Use `SPECTRO_AI_PROVIDER=ollama|openai` for both stages; default Ollama. Reject `baseline` with clear migration message.
+   - Implement OpenAI structured extraction and technical assessment using existing optional SDK dependency. Require explicit model and credentials; lazy-load SDK.
+   - Both providers return same validated domain models and use shared prompts, evidence selection, context handling, and validators.
+   - No provider switching on failure. Missing configuration, timeout, refusal, malformed output, or exhausted context produces actionable error. Allow one structural repair attempt; never silently truncate enquiry.
+
+3. **Strengthen extraction and grounded assessment**
+   - Extraction preserves original text, literal supporting quotations, customer units, unknown scalars as `None`, and missing collections as `[]`. Service owns request IDs and provenance.
+   - Share extraction cleanup across providers; remove hard-coded Ollama metadata. Unsupported facts become unknown with visible diagnostics.
+   - Retrieve existing indexed technical evidence from extracted or expert-corrected facts. Keep source IDs, pages, excerpts, review status, and version.
+   - Assessment generates conditional candidates, trade-offs, relevant questions, and feasibility plan using retrieved evidence only. No evidence or missing critical facts yields explicit abstention, never baseline recommendations.
+   - Require claim-linked evidence for consequential method, geometry, advantage, and limitation statements. Reject unknown citations and mismatched quotations; distinguish source claims, engineering hypotheses, and customer facts.
+   - Validate units without conversions or invented limits. Flag contradictory constraints and unchecked compatibility.
+   - Expose validation outcomes as `error`, `warning`, or `not_checked`. Citation membership and lexical screening never count as scientific validation.
+   - Address recorded Phase 3 failures: unsupported fusion advantage, empty limitations, transferred application context, source optical paths presented as customer configuration, and invented acceptance thresholds. Unresolved claims require expert review or withholding.
+
+4. **Update interfaces and user flow**
+   - Preserve `assess_problem` and `assess_use_case` entry points; remove fallback parameter and legacy provider choices.
+   - Extend extraction metadata for OpenAI; make report provider metadata accurate for successful and abstaining runs. Preserve existing customer/report fields where possible; document intentional legacy contract removal.
+   - Replace offline UI instructions with natural-language enquiry guidance and active provider/model.
+   - Preserve expert corrections; rerun retrieval and assessment without re-extracting corrected facts.
+   - Show facts/quotes, gaps, candidate comparison, evidence details, validation diagnostics, and uncertainty. Preserve Markdown; add JSON download.
+   - Clear stale reports/exports after input, correction, or provider changes and failed runs. Explain hosted data transmission before OpenAI submission.
+   - Leave separate Document Q&A behavior intact.
+
+### Implementation and verification
+
+Deleted baseline module, parser/rule tests and exports. Added neutral guardrails;
+Ollama/OpenAI now share extraction quote cleanup, domain output, source screening,
+context handling and bounded structural repair. Added evidence claim links and
+inspectable diagnostics; verbatim source-claim quotations and study-only geometry
+are conservative lexical checks, not entailment validation. Customer quantity/unit
+matching prevents numerical planning steps from borrowing unrelated source numbers.
+Unsupported candidates are withheld. Qualitative LLM planning remains, with customer
+criteria or TBD, independent references and held-out validation safeguards.
+
+UI displays active provider/model, transmission disclosure, expert corrections,
+Markdown/JSON downloads, source excerpts and validation diagnostics. Input/config
+changes and failures invalidate reports; correction failures remain visible. The
+separate Document Q&A retains behavior. Evaluator loads original D01–D08 enquiry
+blocks (excludes worked answers), H01–H06, four original synthetic inputs, eight
+synthetic paraphrases, five adversarial inputs and custom JSON. It uses assess_problem,
+records per-case failures and continues; matching stale generated artifacts are cleared.
+README, architecture, decisions, hackathon/demo docs, AGENTS, CI and settings updated.
+
+Final software checks: `uv run pytest --basetemp=.cache/pytest-grounded-final`
+**119 passed**; `uv run ruff check .` passed; `uv run ruff format --check .`
+**46 files already formatted**. Streamlit smoke returned **HTTP 200/ok**. Tests require
+writable TEMP/TMP; AppTest and live loopback require sandbox escalation on this host.
+The initial sandbox temp/server errors were environmental; successful reruns above
+are explicit. No approval review rejection occurred.
+
+Local Ollama smoke on Gemma completed all stages and returned insufficient_information:
+NIR candidates lacked linked claims and were removed. Raw JSON/Markdown saved under
+ignored `.cache/grounded-live/`. Initial 2048 output-token smoke failed explicitly;
+4096 completed. Default output budget raised to 4096 and timeout to 240 seconds;
+context remains 16384. No paid calls or commits. OpenAI live smoke unavailable:
+OPENAI_MODEL and OPENAI_API_KEY unset. Full local evaluation results recorded separately.
+
+### Deviations and remaining risks
+
+Source-claim bullets currently require verbatim quotations, a stricter lexical policy
+than claim links alone. It may over-abstain; no semantic/scientific correctness is
+claimed. Unit checks preserve text and screen quoted quantities; hardware compatibility
+and scientific entailment remain not_checked. Expert D01/D02 and unfamiliar-enquiry
+review remains required, including fusion benefit, cross-application transfer and
+source optics/customer configuration issues. The complete scientific gate is not
+accepted by this software entry. Historical reports and customer materials untouched.
+
+Final review additionally removed unit-test dependency on ignored AFS materials,
+using temporary DOCX/TXT fixtures, and bounded OpenAI extraction repair context.
+These two regression tests bring final total to 119 passed.
+
+## Completed — 2026-10-18 — Local evaluation execution
+
+Exact original task text:
+
+- Finish and review local evaluation records for synthetic, D01–D08, P01–P08,
+  A01–A05 and H01–H06 using the identical production pipeline; preserve raw outputs.
+
+Implementation: ran all 31 enquiries through unchanged local Ollama production pipeline,
+preserved raw JSON/Markdown and summary under `.cache/grounded-evaluation-20261018/all/`.
+Verification: command exit 0; 31 completed, 0 runtime failures. Results and limitations
+recorded in docs/LLM_EVALUATION.md. No manual answer edits or paid requests.
+Deviation: automated/software review only; expert scientific acceptance remains pending.
