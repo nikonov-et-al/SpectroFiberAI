@@ -266,5 +266,49 @@ def test_search_rejects_stale_or_corrupt_index(tmp_path: Path) -> None:
         retriever.search(CustomerUseCase(source_text="water"))
 
 
+def test_claim_search_finds_new_document_and_keeps_citation_provenance(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    materials = root / "materials"
+    materials.mkdir(parents=True)
+    (materials / "general.txt").write_text("spectroscopy process monitoring", encoding="utf-8")
+    (materials / "raman.txt").write_text(
+        "Raman measurements can be affected by fluorescence background", encoding="utf-8"
+    )
+    manifest = _manifest(
+        root,
+        [_source("S01", "general.txt"), _source("S02", "raman.txt")],
+    )
+    index_path = root / "index.json"
+    reindex_sources(manifest, index_path)
+    retriever = EvidenceRetriever(index_path, manifest)
+    use_case = CustomerUseCase(source_text="spectroscopy process monitoring")
+
+    results = retriever.search_claim(use_case, "Raman fluorescence background")
+
+    assert results
+    assert results[0].source_id == "S02"
+    assert results[0].document_version
+    assert results[0].page_or_section == "lines 1-1"
+    assert "fluorescence" in results[0].excerpt
+
+
+def test_claim_search_rejects_invalid_citation_provenance(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    materials = root / "materials"
+    materials.mkdir(parents=True)
+    (materials / "source.txt").write_text("NIR spectra support process screening", encoding="utf-8")
+    manifest = _manifest(root, [_source("S01", "source.txt")])
+    index_path = root / "index.json"
+    reindex_sources(manifest, index_path)
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["chunks"][0]["provenance"][0]["document_version"] = "unknown-version"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown source version"):
+        EvidenceRetriever(index_path, manifest).search_claim(
+            CustomerUseCase(source_text="NIR process screening"), "NIR spectra"
+        )
+
+
 def test_source_adapter_does_not_turn_raw_text_into_curated_techniques() -> None:
     assert EvidenceKnowledgeSource().get_techniques() == []

@@ -207,6 +207,7 @@ class AssessmentReport(DomainModel):
     proposed_feasibility_experiment: FeasibilityPlan
     assumptions_and_uncertainties: list[str] = Field(default_factory=list)
     status: Literal["insufficient_information", "provisional", "outside_supported_scope"]
+    production_readiness: Literal["not_assessed", "not_established"] = "not_established"
     assessment_method: Literal["ollama_grounded", "openai_grounded", "evidence_abstention"] = (
         "evidence_abstention"
     )

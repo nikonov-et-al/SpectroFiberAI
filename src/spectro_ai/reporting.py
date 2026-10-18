@@ -15,7 +15,10 @@ def _bullets(values: list[str]) -> list[str]:
     return [f"- {_safe(value)}" for value in values] or ["- None recorded."]
 
 
-def render_markdown(report: AssessmentReport) -> str:
+def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = False) -> str:
+    """Render the customer report; technical detail is explicitly opt-in."""
+    if not include_diagnostics:
+        return _customer_markdown(report)
     case = report.extracted_requirements
     lines = [
         "# Spectroscopy assessment",
@@ -157,6 +160,66 @@ def render_markdown(report: AssessmentReport) -> str:
         lines += (
             [f"### {field.replace('_', ' ').title()}", ""] + _bullets(getattr(plan, field)) + [""]
         )
+    lines += ["## Assumptions and uncertainties", ""] + _bullets(
+        report.assumptions_and_uncertainties
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _customer_markdown(report: AssessmentReport) -> str:
+    case = report.extracted_requirements
+    lines = [
+        "# Spectroscopy assessment",
+        "",
+        f"Status: **{report.status.replace('_', ' ')}**",
+        "",
+        "Exploratory assessment; customer-specific performance and production readiness "
+        "are not established. Expert review required.",
+        "",
+        _safe(report.recommendation_rationale or "No recommendation is made."),
+        "",
+        "## Extracted requirements",
+        "",
+    ]
+    for field in CUSTOMER_FACT_FIELDS:
+        value = getattr(case, field)
+        if value:
+            lines.append(f"- {field.replace('_', ' ').title()}: {_safe(value)}")
+    lines += ["", "## Missing information", ""] + _bullets(
+        [field.replace("_", " ") for field in report.missing_information]
+    )
+    lines += ["", "## Follow-up questions", ""] + _bullets(report.suggested_technical_questions)
+    lines += ["", "## Preliminary candidates", ""]
+    sources = {item.evidence_id: item for item in report.retrieved_evidence}
+    for candidate in report.candidate_techniques:
+        lines += [f"### {_safe(candidate.spectroscopy_method)}", ""]
+        for heading, values in (
+            ("Source observations", candidate.advantages),
+            ("Limitations", candidate.limitations),
+            ("Study assumptions", candidate.required_assumptions),
+        ):
+            lines += [f"**{heading}**", ""] + _bullets(values) + [""]
+        for claim in candidate.evidence_claims:
+            source = sources.get(claim.evidence_id)
+            if source:
+                # Chunk identifiers and extraction metadata belong in diagnostics.
+                page = re.sub(r"\s*\(chunk[^)]*\)", "", source.page_or_section or "")
+                lines += [
+                    f"Source: {_safe(source.source_id)} {_safe(page)} · "
+                    f"document version {_safe(source.document_version or 'unspecified')}",
+                    "",
+                    f"> {_safe(claim.quote)}",
+                    "",
+                ]
+    plan = report.proposed_feasibility_experiment
+    lines += ["## Proposed feasibility experiment", ""]
+    for field in type(plan).model_fields:
+        value = getattr(plan, field)
+        if not value:
+            continue
+        lines += [f"**{field.replace('_', ' ').title()}**", ""]
+        lines += _bullets(value) if isinstance(value, list) else [_safe(value)]
+        lines.append("")
     lines += ["## Assumptions and uncertainties", ""] + _bullets(
         report.assumptions_and_uncertainties
     )

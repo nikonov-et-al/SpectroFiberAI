@@ -149,9 +149,13 @@ if report is not None and st.session_state.get("report_input") == problem and no
         file_name="spectro-ai-assessment.json",
         mime="application/json",
     )
-    report_tab, structured_tab = st.tabs(["Assessment", "Structured report"])
+    report_tab, diagnostics_tab, structured_tab = st.tabs(
+        ["Assessment", "Technical diagnostics", "Structured report"]
+    )
     with report_tab:
         st.markdown(markdown)
+    with diagnostics_tab:
+        st.markdown(render_markdown(report, include_diagnostics=True))
         diagnostics = getattr(report, "validation_diagnostics", [])
         if diagnostics:
             st.subheader("Deterministic validation")

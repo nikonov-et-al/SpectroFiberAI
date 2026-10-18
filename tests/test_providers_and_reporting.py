@@ -27,10 +27,23 @@ def test_markdown_renders_neutral_abstention_and_validation_diagnostics() -> Non
         CustomerUseCase(source_text=source),
         "No source evidence was retrieved; assessment abstained.",
     )
-    markdown = render_markdown(report)
+    markdown = render_markdown(report, include_diagnostics=True)
     assert source in markdown
     assert "## Extracted requirements" in markdown
     assert "## Missing information" in markdown
     assert "## Follow-up questions" in markdown
     assert "## Proposed feasibility experiment" in markdown
     assert "No source evidence was retrieved" in markdown
+
+
+def test_customer_report_keeps_internal_logs_in_technical_view() -> None:
+    report = abstention_report(CustomerUseCase(), "Evidence is insufficient.")
+    report.assessment_warnings = ["Removed candidate: internal chunk-007 mismatch"]
+    report.extracted_requirements.extraction_warnings = ["Internal extraction log"]
+    customer = render_markdown(report)
+    technical = render_markdown(report, include_diagnostics=True)
+    assert "chunk-007" not in customer
+    assert "Internal extraction log" not in customer
+    assert "Deterministic validation" not in customer
+    assert "chunk-007" in technical
+    assert "Internal extraction log" in technical

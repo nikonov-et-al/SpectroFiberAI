@@ -21,17 +21,22 @@ def missing_fields(case: CustomerUseCase) -> list[str]:
 
 def prioritized_questions(case: CustomerUseCase) -> list[str]:
     questions = {
-        "measurement_objective": "What decision must the measurement support?",
-        "target_analyte_or_property": "Which analyte or property must be measured?",
-        "sample_matrix": "What material or matrix will be measured?",
-        "concentration_range": "What target range must the study cover?",
-        "temperature": "What temperature range applies at the measurement point?",
-        "pressure": "What pressure applies at the measurement point?",
-        "measurement_frequency": "How often must measurements be available?",
-        "installation_constraints": "What optical access and installation constraints apply?",
-        "reference_measurement": "Which independent reference measurement is available?",
+        "measurement_objective": "What decision must measurement support? This sets required output and validation.",
+        "target_analyte_or_property": "Which analyte or property must be measured? This determines spectral target and technique selection.",
+        "sample_matrix": "What material or matrix will be measured? This affects optical access, sample handling, and interference checks.",
+        "concentration_range": "What target range must study cover? This sets calibration design and validation coverage.",
+        "reference_measurement": "Which independent reference can label study samples? This is needed for held-out validation.",
+        "interference": "Which known interferents must representative samples cover? This affects study design and interpretation.",
+        "composition": "Which composition or batch variation is expected? This defines representative variation.",
+        "temperature": "What temperature range applies at measurement point? This affects experiment conditions and integration review.",
+        "pressure": "What pressure applies at measurement point? This affects safe probe and installation review.",
+        "measurement_frequency": "How often must results be available? This affects acquisition and integration design.",
+        "installation_constraints": "What optical access and installation constraints apply? This affects probe feasibility and integration.",
+        "deployment_mode": "Where and how will measurement run? This affects sampling and integration design.",
     }
-    return [questions[field] for field in missing_fields(case) if field in questions]
+    priority = tuple(questions)
+    missing = set(missing_fields(case))
+    return [questions[field] for field in priority if field in missing]
 
 
 def abstention_report(
