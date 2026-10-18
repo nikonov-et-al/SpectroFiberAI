@@ -4,6 +4,8 @@
 
 > This is a hackathon prototype, not a validated scientific instrument or autonomous recommendation system. Results are exploratory and require expert review, representative samples, and independent reference measurements. Software checks and citations do not establish scientific suitability.
 
+![SchubKI card](hackathon.png)
+
 ## What it does
 
 1. Extracts requirements and exact customer quotations from a natural-language enquiry.
