@@ -1,5 +1,19 @@
 # Unified assessment knowledge base
 
+## Experimental complementary queries
+
+The optional multi-query path extends this same engine; it does not replace grouped
+retrieval or create another index. One generation request follows validated facts
+and corrections, with an original-case anchor plus up to three complementary
+questions. One snapshot spans retrieval and verification. Pooling prevents repeated
+query hits from accumulating votes; final reranking, parent-context expansion,
+source review and citation validation use shared code. Default remains disabled.
+
+Query plans are technical diagnostics only, never customer facts or evidence.
+Invalid/no-useful generation and optional deadline exhaustion visibly restore
+grouped retrieval; incompatible indexes and provider failures remain errors.
+See [multi-query protocol](MULTI_QUERY_RETRIEVAL.md) for evaluation and demo gates.
+
 Implemented 2026-10-18. Spectroscopy assessment now retrieves from one SQLite
 knowledge base using BM25 and persisted Ollama embeddings. Standalone Document Q&A
 has been removed.

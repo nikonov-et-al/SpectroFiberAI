@@ -92,6 +92,38 @@ def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = Fal
             if item.failure_reason:
                 detail += f"; fallback reason: {item.failure_reason}"
             lines.append(f"- {_safe(detail)}")
+    query = report.query_diagnostics
+    if query is not None:
+        lines += ["", "## Multi-query retrieval diagnostics", ""]
+        lines.append(
+            f"- Status: {_safe(query.status)}; {query.candidate_count} candidates; "
+            f"{query.unique_document_count} documents; {query.selected_count} selected; "
+            f"{query.elapsed_ms:.1f} ms"
+        )
+        if query.model_identity:
+            lines.append(f"- Planner: {_safe(query.model_identity)}")
+        if query.prompt_tokens is not None or query.completion_tokens is not None:
+            input_tokens = query.prompt_tokens if query.prompt_tokens is not None else "unknown"
+            output_tokens = (
+                query.completion_tokens if query.completion_tokens is not None else "unknown"
+            )
+            lines.append(f"- Planner tokens: {input_tokens} input; {output_tokens} output")
+        lines.append(f"- Planner calls: {query.planner_call_count}")
+        if query.reason_codes:
+            readable_reasons = ", ".join(code.replace("_", " ") for code in query.reason_codes)
+            lines.append("- Reason codes: " + _safe(readable_reasons))
+        if query.accepted_questions:
+            lines += ["- Accepted questions:"]
+            lines.extend(
+                f"  - {_safe(item.question)} (anchors: {_safe(', '.join(item.anchor_fields))})"
+                for item in query.accepted_questions
+            )
+        if query.question_evidence:
+            lines += ["- Question evidence membership:"]
+            lines.extend(
+                f"  - {_safe(question)}: {_safe(', '.join(ids)) or 'no candidates'}"
+                for question, ids in query.question_evidence.items()
+            )
     lines += ["", "## Original customer text", ""]
     source = case.source_text or "No input supplied."
     # A longer fence safely contains arbitrary customer backticks.

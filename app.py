@@ -82,6 +82,24 @@ knowledge_config_signature = (
     os.getenv("SPECTRO_RAG_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L6-v2"),
     os.getenv("SPECTRO_RAG_RERANKER_REVISION", "main"),
     os.getenv("SPECTRO_RAG_RERANK_CANDIDATES", "30"),
+    os.getenv("SPECTRO_RAG_MULTI_QUERY", "false"),
+    os.getenv("SPECTRO_RAG_MULTI_QUERY_MAX_QUERIES", "4"),
+    os.getenv("SPECTRO_RAG_MULTI_QUERY_TIMEOUT", "30"),
+    os.getenv("SPECTRO_RAG_MULTI_QUERY_SEARCH_TIMEOUT", "30"),
+)
+multi_query_enabled = os.getenv("SPECTRO_RAG_MULTI_QUERY", "false").strip().casefold() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+st.caption(
+    "Experimental multi-query retrieval: "
+    + (
+        "enabled · review diagnostics and benchmark before demo use"
+        if multi_query_enabled
+        else "disabled"
+    )
 )
 try:
     retriever = providers.EvidenceRetriever()

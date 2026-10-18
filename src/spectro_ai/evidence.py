@@ -1940,6 +1940,261 @@ class EvidenceRetriever:
         """Return fused unique candidates before final excerpt and byte limits."""
         return self._search_many(_query_groups(use_case), limit, candidate_mode=True)
 
+    def search_questions(
+        self,
+        use_case: CustomerUseCase,
+        questions: list[str],
+        limit: int = 8,
+        timeout: int = 30,
+        *,
+        include_anchor: bool = True,
+    ) -> list[RetrievedEvidence]:
+        self.retrieval_diagnostics = []
+        return self._search_questions(
+            use_case,
+            questions,
+            limit,
+            timeout,
+            include_anchor=include_anchor,
+            candidate_mode=False,
+        )
+
+    def search_question_candidates(
+        self,
+        use_case: CustomerUseCase,
+        questions: list[str],
+        limit: int = 30,
+        timeout: int = 30,
+        *,
+        include_anchor: bool = True,
+    ) -> list[RetrievedEvidence]:
+        return self._search_questions(
+            use_case,
+            questions,
+            limit,
+            timeout,
+            include_anchor=include_anchor,
+            candidate_mode=True,
+        )
+
+    def select_question_candidates(
+        self, candidates: list[RetrievedEvidence], limit: int = 8
+    ) -> list[RetrievedEvidence]:
+        index = self.index_metadata()
+        ranked = [
+            (
+                item.retrieval_score or 0.0,
+                position,
+                item,
+            )
+            for position, item in enumerate(candidates)
+        ]
+        return self._select_question_results(ranked, limit, index)
+
+    def _search_questions(
+        self,
+        use_case: CustomerUseCase,
+        questions: list[str],
+        limit: int,
+        timeout: int,
+        *,
+        include_anchor: bool,
+        candidate_mode: bool,
+        pinned_index: dict[str, Any] | None = None,
+    ) -> list[RetrievedEvidence]:
+        from time import monotonic
+
+        from spectro_ai import providers
+
+        if limit < 1 or timeout < 1:
+            raise ValueError("limit and timeout must be positive")
+        self.retrieval_diagnostics = []
+        query_list = list(dict.fromkeys(q.strip() for q in questions if q.strip()))
+        if include_anchor:
+            anchor = _query_text(use_case)
+            query_list.insert(0, anchor)
+        query_list = list(dict.fromkeys(query_list))
+        self.last_query_diagnostics = {"question_evidence": {}, "candidate_count": 0}
+        if not query_list:
+            return []
+        deadline = monotonic() + timeout
+
+        def remaining() -> int:
+            seconds = deadline - monotonic()
+            if seconds <= 0:
+                raise providers.RetrievalDeadlineExceeded(
+                    "Multi-query retrieval exceeded configured deadline"
+                )
+            return max(1, int(seconds))
+
+        index = pinned_index or self.index_metadata()
+        if self.mode == "hybrid":
+            if index.get("embedding_model") != self.settings.embedding_model:
+                raise ValueError("Embedding model changed; run Update Knowledge Base")
+            identity = providers.embedding_identity(
+                self.settings,
+                timeout=remaining(),
+                lock_timeout=deadline - monotonic(),
+            )
+            if identity != index.get("embedding_identity"):
+                raise ValueError("Embedding model revision changed; run Update Knowledge Base")
+            if index.get("schema_version") == _INDEX_SCHEMA_VERSION and index.get(
+                "embedding_configuration"
+            ) != _embedding_config(self.settings, identity, index["embedding_dimension"]):
+                raise ValueError("Embedding configuration changed; run Update Knowledge Base")
+        candidate_cap = limit if candidate_mode else self.settings.reranker_candidates
+        candidate_cap = max(candidate_cap, 1)
+        per_query: list[list[RetrievedEvidence]] = []
+        for query in query_list:
+            budget = remaining()
+            per_query.append(
+                self._search(
+                    query,
+                    max(candidate_cap, self.bm25_candidates, self.semantic_candidates),
+                    index,
+                    apply_context_budget=False,
+                    timeout=budget,
+                    deadline=deadline,
+                )
+            )
+        # The final request can consume the remaining budget without another
+        # loop iteration to observe it. Keep optional retrieval deadlines
+        # cooperative between requests and before CPU reranking.
+        remaining()
+
+        chunk_by_evidence = {
+            provenance["evidence_id"]: chunk["chunk_id"]
+            for chunk in index.get("chunks", [])
+            for provenance in chunk.get("provenance", [])
+            if isinstance(provenance, dict) and provenance.get("evidence_id")
+        }
+        document_by_evidence = {
+            provenance["evidence_id"]: (
+                provenance.get("source_id", ""),
+                provenance.get("filename", ""),
+            )
+            for chunk in index.get("chunks", [])
+            for provenance in chunk.get("provenance", [])
+            if isinstance(provenance, dict) and provenance.get("evidence_id")
+        }
+        best: dict[str, tuple[float, int, RetrievedEvidence]] = {}
+        memberships: dict[str, list[str]] = {}
+        for query_position, (query, hits) in enumerate(zip(query_list, per_query, strict=True)):
+            seen_chunks: set[str] = set()
+            for rank, hit in enumerate(hits, 1):
+                identity = chunk_by_evidence.get(hit.evidence_id, hit.evidence_id)
+                if identity in seen_chunks:
+                    continue
+                seen_chunks.add(identity)
+                memberships.setdefault(query, []).append(hit.evidence_id)
+                score = 1 / (self.rrf_k + rank)
+                current = best.get(identity)
+                if current is None or score > current[0]:
+                    best[identity] = (
+                        score,
+                        min(current[1], query_position) if current else query_position,
+                        current[2] if current else hit,
+                    )
+
+        # Stable round robin bounds pool while preserving each query's candidates.
+        pool_by_identity: dict[str, tuple[float, int, RetrievedEvidence]] = {}
+        max_depth = max((len(items) for items in per_query), default=0)
+        for depth in range(max_depth):
+            for hits in per_query:
+                if depth >= len(hits):
+                    continue
+                hit = hits[depth]
+                identity = chunk_by_evidence.get(hit.evidence_id, hit.evidence_id)
+                fused = best.get(identity)
+                if fused is not None:
+                    pool_by_identity.setdefault(identity, fused)
+                    if len(pool_by_identity) >= candidate_cap:
+                        break
+            if len(pool_by_identity) >= candidate_cap:
+                break
+        ranked = sorted(
+            pool_by_identity.values(),
+            key=lambda row: (-row[0], row[1], row[2].evidence_id),
+        )
+        self.last_query_diagnostics = {
+            "question_evidence": memberships,
+            "candidate_count": len(ranked),
+            "unique_document_count": len(
+                {
+                    document_by_evidence.get(hit.evidence_id, (hit.source_id, ""))
+                    for _, _, hit in ranked
+                }
+            ),
+        }
+        if candidate_mode:
+            return [hit.model_copy(update={"retrieval_score": score}) for score, _, hit in ranked]
+
+        if self.settings.reranker == "cross_encoder" and ranked:
+            tie_position = {hit.evidence_id: position for _, position, hit in ranked}
+            reranked = self._rerank_ranked(
+                [(score, hit) for score, _, hit in ranked],
+                _query_text(use_case),
+                self.settings.reranker_candidates,
+                self.retrieval_diagnostics,
+            )
+            ranked = [(score, tie_position.get(hit.evidence_id, 0), hit) for score, hit in reranked]
+        else:
+            self.retrieval_diagnostics.append({"status": "disabled"})
+
+        selected = self._select_question_results(ranked, limit, index)
+        self.last_query_diagnostics["selected_count"] = len(selected)
+        return selected
+
+    def _select_question_results(
+        self,
+        ranked: list[tuple[float, int, RetrievedEvidence]],
+        limit: int,
+        index: dict[str, Any],
+    ) -> list[RetrievedEvidence]:
+        provenance_by_id = {
+            provenance.get("evidence_id"): provenance
+            for chunk in index.get("chunks", [])
+            for provenance in chunk.get("provenance", [])
+            if provenance.get("evidence_id")
+        }
+
+        def document_key(hit: RetrievedEvidence) -> tuple[str, str]:
+            provenance = provenance_by_id.get(hit.evidence_id) or {}
+            return hit.source_id, str(provenance.get("filename", ""))
+
+        if self.parent_expansion:
+            return self._select_with_parent_context(
+                [(score, hit) for score, _, hit in ranked],
+                limit,
+                index,
+                document_cap=2,
+            )
+
+        selected: list[tuple[float, int, RetrievedEvidence]] = []
+        counts: Counter[tuple[str, str]] = Counter()
+        used: set[str] = set()
+        used_bytes = 0
+        maximum = min(2, limit)
+        for diversity_pass in (True, False):
+            for score, position, hit in ranked:
+                if hit.evidence_id in used:
+                    continue
+                key = document_key(hit)
+                if diversity_pass and counts[key] >= maximum:
+                    continue
+                if used_bytes + len(hit.excerpt.encode("utf-8")) > self.context_budget:
+                    continue
+                selected.append((score, position, hit))
+                used.add(hit.evidence_id)
+                counts[key] += 1
+                used_bytes += len(hit.excerpt.encode("utf-8"))
+                if len(selected) >= limit:
+                    break
+            if len(selected) >= limit:
+                break
+        fused = [(score, hit) for score, _, hit in selected]
+        return [hit.model_copy(update={"retrieval_score": score}) for score, hit in fused]
+
     def search_claim_candidates(
         self, use_case: CustomerUseCase, claim: str, limit: int = 30
     ) -> list[RetrievedEvidence]:
@@ -2002,53 +2257,12 @@ class EvidenceRetriever:
                 hit.model_copy(update={"retrieval_score": score}) for score, hit in ranked[:limit]
             ]
         if reranking:
-            from time import perf_counter
-
-            from spectro_ai.providers import ProviderError, rerank_scores
-
-            pool = ranked[:candidate_limit]
-            started = perf_counter()
-            if not pool:
-                if diagnostics is not None:
-                    diagnostics.append({"status": "skipped", "candidate_count": 0})
-                return []
-            try:
-                query_text = rerank_query or "\n".join(queries)
-                scores, revision = rerank_scores(
-                    self.settings, query_text, [hit.excerpt for _, hit in pool]
-                )
-                if len(scores) != len(pool):
-                    raise ValueError("reranker returned wrong score count")
-                ranked = sorted(
-                    (
-                        (
-                            pool[i][0],
-                            hit.model_copy(
-                                update={"retrieval_score": pool[i][0], "rerank_score": scores[i]}
-                            ),
-                        )
-                        for i, (_, hit) in enumerate(pool)
-                    ),
-                    key=lambda item: (-float(item[1].rerank_score), -item[0]),
-                )
-                diagnostic = {
-                    "status": "applied",
-                    "model_revision": revision,
-                    "candidate_count": len(pool),
-                    "elapsed_ms": (perf_counter() - started) * 1000,
-                }
-            except (ProviderError, ValueError, TypeError) as exc:
-                diagnostic = {
-                    "status": "fallback",
-                    "model_revision": self.settings.reranker_revision,
-                    "candidate_count": len(pool),
-                    "elapsed_ms": (perf_counter() - started) * 1000,
-                    "failure_reason": str(exc),
-                }
-                ranked = pool
-            if diagnostics is not None:
-                diagnostics.append(diagnostic)
-            ranked = [(score, hit) for score, hit in ranked]
+            ranked = self._rerank_ranked(
+                ranked,
+                rerank_query or "\n".join(queries),
+                candidate_limit,
+                diagnostics,
+            )
         else:
             if diagnostics is not None:
                 diagnostics.append({"status": "disabled"})
@@ -2066,33 +2280,97 @@ class EvidenceRetriever:
                 break
         return selected
 
+    def _rerank_ranked(
+        self,
+        ranked: list[tuple[float, RetrievedEvidence]],
+        query: str,
+        candidate_limit: int,
+        diagnostics: list[dict[str, Any]] | None,
+    ) -> list[tuple[float, RetrievedEvidence]]:
+        from time import perf_counter
+
+        from spectro_ai.providers import ProviderError, rerank_scores
+
+        pool = ranked[:candidate_limit]
+        started = perf_counter()
+        if not pool:
+            if diagnostics is not None:
+                diagnostics.append({"status": "skipped", "candidate_count": 0})
+            return []
+        try:
+            scores, revision = rerank_scores(self.settings, query, [hit.excerpt for _, hit in pool])
+            if len(scores) != len(pool):
+                raise ValueError("reranker returned wrong score count")
+            reranked = sorted(
+                (
+                    (
+                        pool[i][0],
+                        hit.model_copy(
+                            update={"retrieval_score": pool[i][0], "rerank_score": scores[i]}
+                        ),
+                    )
+                    for i, (_, hit) in enumerate(pool)
+                ),
+                key=lambda item: (-float(item[1].rerank_score), -item[0]),
+            )
+            diagnostic = {
+                "status": "applied",
+                "model_revision": revision,
+                "candidate_count": len(pool),
+                "elapsed_ms": (perf_counter() - started) * 1000,
+            }
+        except (ProviderError, ValueError, TypeError) as exc:
+            diagnostic = {
+                "status": "fallback",
+                "model_revision": self.settings.reranker_revision,
+                "candidate_count": len(pool),
+                "elapsed_ms": (perf_counter() - started) * 1000,
+                "failure_reason": str(exc),
+            }
+            reranked = pool
+        if diagnostics is not None:
+            diagnostics.append(diagnostic)
+        return reranked
+
     def _select_with_parent_context(
         self,
         ranked: list[tuple[float, RetrievedEvidence]],
         limit: int,
         index: dict[str, Any],
+        document_cap: int | None = None,
     ) -> list[RetrievedEvidence]:
         child_capacity = int(self.context_budget * 0.7)
         context_capacity = self.context_budget - child_capacity
         child_used = 0
         selected: list[tuple[float, RetrievedEvidence]] = []
         selected_ids: set[str] = set()
-        for score, hit in ranked:
-            cost = len(hit.excerpt.encode("utf-8"))
-            if child_used + cost > child_capacity:
-                continue
-            selected.append((score, hit))
-            selected_ids.add(hit.evidence_id)
-            child_used += cost
-            if len(selected) >= limit:
-                break
-
         provenance_by_id = {
             provenance.get("evidence_id"): provenance
             for chunk in index.get("chunks", [])
             for provenance in chunk.get("provenance", [])
             if provenance.get("evidence_id")
         }
+        document_counts: Counter[tuple[str, str]] = Counter()
+        for diverse in (True, False) if document_cap is not None else (False,):
+            for score, hit in ranked:
+                if hit.evidence_id in selected_ids:
+                    continue
+                provenance = provenance_by_id.get(hit.evidence_id) or {}
+                document = (hit.source_id, str(provenance.get("filename", "")))
+                if diverse and document_counts[document] >= (document_cap or 0):
+                    continue
+                cost = len(hit.excerpt.encode("utf-8"))
+                if child_used + cost > child_capacity:
+                    continue
+                selected.append((score, hit))
+                selected_ids.add(hit.evidence_id)
+                document_counts[document] += 1
+                child_used += cost
+                if len(selected) >= limit:
+                    break
+            if len(selected) >= limit:
+                break
+
         block_map = {
             item.get("block_id"): item
             for item in index.get("source_blocks", [])
@@ -2216,9 +2494,19 @@ class EvidenceRetriever:
         # Use unspent reserved capacity for additional ranked children after context
         # has been allocated in rank order. These results carry no parent expansion.
         total_used = child_used + context_used
-        if len(expanded) < limit:
+        for diversity_only in (True, False) if document_cap is not None else (False,):
+            if len(expanded) >= limit:
+                break
             for score, hit in ranked:
                 if hit.evidence_id in selected_ids:
+                    continue
+                provenance = provenance_by_id.get(hit.evidence_id) or {}
+                document = (hit.source_id, str(provenance.get("filename", "")))
+                if (
+                    diversity_only
+                    and document_cap is not None
+                    and document_counts[document] >= document_cap
+                ):
                     continue
                 cost = len(hit.excerpt.encode("utf-8"))
                 if total_used + cost > self.context_budget:
@@ -2237,6 +2525,7 @@ class EvidenceRetriever:
                     )
                 )
                 selected_ids.add(hit.evidence_id)
+                document_counts[document] += 1
                 attached_block_ids.update(child_blocks)
                 total_used += cost
                 if len(expanded) >= limit:
@@ -2354,6 +2643,8 @@ class EvidenceRetriever:
         pinned_index: dict[str, Any] | None = None,
         *,
         apply_context_budget: bool = True,
+        timeout: int = 120,
+        deadline: float | None = None,
     ) -> list[RetrievedEvidence]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
@@ -2387,9 +2678,25 @@ class EvidenceRetriever:
         bm25 = [number for _, number in ranked[: self.bm25_candidates]]
         semantic: list[int] = []
         if self.mode == "hybrid":
+            from time import monotonic
+
             from spectro_ai import providers
 
-            query_vector = providers.embed_texts(self.settings, [query_text])[0]
+            remaining = timeout if deadline is None else deadline - monotonic()
+            if remaining <= 0:
+                raise providers.RetrievalDeadlineExceeded(
+                    "Multi-query retrieval exceeded configured deadline"
+                )
+            query_vector = (
+                providers.embed_texts(self.settings, [query_text])
+                if deadline is None
+                else providers.embed_texts(
+                    self.settings,
+                    [query_text],
+                    timeout=max(1, int(remaining)),
+                    lock_timeout=remaining,
+                )
+            )[0]
             valid_query = bool(query_vector) and all(
                 isinstance(value, (int, float))
                 and not isinstance(value, bool)
@@ -2545,7 +2852,9 @@ class EvidenceRetriever:
 class _PinnedEvidenceRetriever:
     def __init__(self, retriever: EvidenceRetriever, metadata: dict[str, Any]) -> None:
         self.retriever, self.metadata = retriever, metadata
+        self.settings = retriever.settings
         self.retrieval_diagnostics: list[dict[str, Any]] = []
+        self.last_query_diagnostics: dict[str, Any] = {}
 
     def index_metadata(self) -> dict[str, Any]:
         return self.metadata
@@ -2577,6 +2886,63 @@ class _PinnedEvidenceRetriever:
         return self.retriever._search_many(
             _query_groups(use_case), limit, self.metadata, candidate_mode=True
         )
+
+    def search_questions(
+        self,
+        use_case: CustomerUseCase,
+        questions: list[str],
+        limit: int = 8,
+        timeout: int = 30,
+        *,
+        include_anchor: bool = True,
+    ) -> list[RetrievedEvidence]:
+        self.retrieval_diagnostics = []
+        result = self.retriever._search_questions(
+            use_case,
+            questions,
+            limit,
+            timeout,
+            include_anchor=include_anchor,
+            candidate_mode=False,
+            pinned_index=self.metadata,
+        )
+        self.last_query_diagnostics = self.retriever.last_query_diagnostics
+        self.retrieval_diagnostics = self.retriever.retrieval_diagnostics
+        return result
+
+    def search_question_candidates(
+        self,
+        use_case: CustomerUseCase,
+        questions: list[str],
+        limit: int = 30,
+        timeout: int = 30,
+        *,
+        include_anchor: bool = True,
+    ) -> list[RetrievedEvidence]:
+        result = self.retriever._search_questions(
+            use_case,
+            questions,
+            limit,
+            timeout,
+            include_anchor=include_anchor,
+            candidate_mode=True,
+            pinned_index=self.metadata,
+        )
+        self.last_query_diagnostics = self.retriever.last_query_diagnostics
+        return result
+
+    def select_question_candidates(
+        self, candidates: list[RetrievedEvidence], limit: int = 8
+    ) -> list[RetrievedEvidence]:
+        ranked = [
+            (
+                item.retrieval_score or 0.0,
+                position,
+                item,
+            )
+            for position, item in enumerate(candidates)
+        ]
+        return self.retriever._select_question_results(ranked, limit, self.metadata)
 
     def search_claim_candidates(
         self, use_case: CustomerUseCase, claim: str, limit: int = 30

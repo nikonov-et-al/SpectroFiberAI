@@ -3,6 +3,7 @@
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -26,7 +27,10 @@ from spectro_ai.models import (
     CustomerUseCase,
     Evidence,
     EvidenceClaim,
+    EvidenceQueryPlan,
+    EvidenceQuestion,
     FeasibilityPlan,
+    QueryDiagnostics,
     RetrievalDiagnostic,
     RetrievedEvidence,
     TechniqueCandidate,
@@ -34,6 +38,23 @@ from spectro_ai.models import (
 )
 
 _OLLAMA_LOCK = Lock()
+
+
+class ProviderError(ValueError):
+    """A provider is unknown, incomplete, or deliberately unavailable."""
+
+
+class RetrievalDeadlineExceeded(ProviderError):
+    """Optional multi-query retrieval exhausted its request deadline."""
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, str(default)).strip().casefold()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off", ""}:
+        return False
+    raise ProviderError(f"{name} must be a boolean value")
 
 
 @dataclass(frozen=True)
@@ -49,6 +70,10 @@ class RagSettings:
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
     reranker_revision: str = "main"
     reranker_candidates: int = 30
+    multi_query: bool = False
+    multi_query_max_queries: int = 4
+    multi_query_timeout: int = 30
+    multi_query_search_timeout: int = 30
 
     def __post_init__(self) -> None:
         if self.reranker not in {"none", "cross_encoder"}:
@@ -57,6 +82,10 @@ class RagSettings:
             raise ValueError("reranker model and revision must be nonempty")
         if self.reranker_candidates < 1:
             raise ValueError("reranker_candidates must be at least 1")
+        if not 2 <= self.multi_query_max_queries <= 4:
+            raise ValueError("multi_query_max_queries must be between 2 and 4")
+        if self.multi_query_timeout < 1 or self.multi_query_search_timeout < 1:
+            raise ValueError("multi-query timeouts must be positive")
 
     @classmethod
     def from_env(cls) -> RagSettings:
@@ -73,6 +102,11 @@ class RagSettings:
             raise ProviderError("SPECTRO_RAG_EVIDENCE_COUNT must be at least 1")
         try:
             reranker_candidates = int(os.getenv("SPECTRO_RAG_RERANK_CANDIDATES", "30"))
+            multi_query_max_queries = int(os.getenv("SPECTRO_RAG_MULTI_QUERY_MAX_QUERIES", "4"))
+            multi_query_timeout = int(os.getenv("SPECTRO_RAG_MULTI_QUERY_TIMEOUT", "30"))
+            multi_query_search_timeout = int(
+                os.getenv("SPECTRO_RAG_MULTI_QUERY_SEARCH_TIMEOUT", "30")
+            )
         except ValueError:
             raise ProviderError("SPECTRO_RAG_RERANK_CANDIDATES must be an integer") from None
         reranker = os.getenv("SPECTRO_RAG_RERANKER", "none").strip().lower()
@@ -95,6 +129,10 @@ class RagSettings:
             reranker_model=os.getenv("SPECTRO_RAG_RERANKER_MODEL", cls.reranker_model),
             reranker_revision=os.getenv("SPECTRO_RAG_RERANKER_REVISION", cls.reranker_revision),
             reranker_candidates=reranker_candidates,
+            multi_query=_env_bool("SPECTRO_RAG_MULTI_QUERY", False),
+            multi_query_max_queries=multi_query_max_queries,
+            multi_query_timeout=multi_query_timeout,
+            multi_query_search_timeout=multi_query_search_timeout,
         )
 
 
@@ -248,19 +286,45 @@ def ollama_request(
     payload: dict | None = None,
     *,
     timeout: int = 120,
+    lock_timeout: float | None = None,
 ) -> dict:
+    deadline = None
+    if lock_timeout is not None:
+        from time import monotonic
+
+        deadline = monotonic() + max(0.0, lock_timeout)
     try:
         request = Request(
             settings.ollama_url + route,
             data=json.dumps(payload).encode() if payload is not None else None,
             headers={"Content-Type": "application/json"},
         )
-        with _OLLAMA_LOCK, urlopen(request, timeout=timeout) as response:
-            result = json.load(response)
+        if lock_timeout is None:
+            _OLLAMA_LOCK.acquire()
+        elif not _OLLAMA_LOCK.acquire(timeout=max(0.0, lock_timeout)):
+            raise RetrievalDeadlineExceeded("Ollama request lock exceeded retrieval deadline")
+        try:
+            request_timeout = timeout
+            if deadline is not None:
+                request_timeout = min(timeout, max(0.001, deadline - monotonic()))
+            with urlopen(request, timeout=request_timeout) as response:
+                result = json.load(response)
+        finally:
+            _OLLAMA_LOCK.release()
+        if deadline is not None and monotonic() >= deadline:
+            raise RetrievalDeadlineExceeded("Ollama request exceeded retrieval deadline")
         if not isinstance(result, dict) or result.get("error"):
             raise ValueError
         return result
-    except HTTPError, URLError, TimeoutError, OSError, ValueError:
+    except RetrievalDeadlineExceeded:
+        raise
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        if lock_timeout is not None and (
+            isinstance(exc, TimeoutError)
+            or isinstance(exc, URLError)
+            and isinstance(exc.reason, TimeoutError)
+        ):
+            raise RetrievalDeadlineExceeded("Ollama request exceeded retrieval deadline") from None
         raise ProviderError(
             "Ollama request failed. Check endpoint, installed model and context; "
             f"timeout is {timeout}s."
@@ -330,6 +394,167 @@ def _extraction_schema() -> dict:
         }
     )
     return _strict_schema({"type": "object", "properties": properties})
+
+
+def _query_plan_schema(use_case: CustomerUseCase | None = None) -> dict:
+    schema = EvidenceQueryPlan.model_json_schema()
+    if use_case is not None:
+        available = [field for field in CUSTOMER_FACT_FIELDS if getattr(use_case, field)]
+        schema["$defs"]["EvidenceQuestion"]["properties"]["anchor_fields"]["items"]["enum"] = (
+            available
+        )
+    return _strict_schema(schema)
+
+
+def validate_evidence_query_plan(
+    plan: EvidenceQueryPlan,
+    use_case: CustomerUseCase,
+    *,
+    max_questions: int = 3,
+) -> tuple[list[EvidenceQuestion], list[str]]:
+    """Keep only short questions anchored to populated, validated customer facts."""
+    from spectro_ai.evidence import _tokens
+
+    accepted: list[EvidenceQuestion] = []
+    reasons: list[str] = []
+    seen: list[set[str]] = []
+    facts = " ".join(
+        str(getattr(use_case, field)) for field in CUSTOMER_FACT_FIELDS if getattr(use_case, field)
+    )
+    facts += " " + " ".join(use_case.strict_requirements)
+    numeric = re.compile(r"(?<![\w])[-+]?\d+(?:[.,]\d+)?\s*(?:%|[A-Za-zµμ°]+(?:/[A-Za-zµμ]+)?)?")
+    unit = re.compile(
+        r"(?<!\w)(?:°\s?[CFK]|%|ppm|ppb|ppt|mg|µg|μg|g|kg|ml|mL|µL|μL|L|mol|mmol|µmol|μmol|Pa|kPa|MPa|bar|Hz|kHz|MHz|s|ms|min|h|nm|µm|μm)(?!\w)",
+        re.IGNORECASE,
+    )
+    fact_quantities = {value.casefold() for value in numeric.findall(facts)}
+    fact_units = {value.casefold().replace(" ", "") for value in unit.findall(facts)}
+
+    for item in plan.questions:
+        fields = list(dict.fromkeys(item.anchor_fields))
+        if not fields or any(
+            field not in CUSTOMER_FACT_FIELDS or not getattr(use_case, field) for field in fields
+        ):
+            reasons.append("invalid_anchor")
+            continue
+        question = " ".join(item.question.split()).strip()
+        if not question or len(question) > 400:
+            reasons.append("invalid_length")
+            continue
+        question_tokens = set(_tokens(question))
+        anchor_tokens = {
+            token for field in fields for token in _tokens(str(getattr(use_case, field)))
+        }
+        if not question_tokens.intersection(anchor_tokens):
+            reasons.append("anchor_not_present")
+            continue
+        if any(value.casefold() not in fact_quantities for value in numeric.findall(question)):
+            reasons.append("unsupported_quantity")
+            continue
+        if any(
+            value.casefold().replace(" ", "") not in fact_units for value in unit.findall(question)
+        ):
+            reasons.append("unsupported_unit")
+            continue
+        normalized = set(question_tokens)
+        if any(len(normalized & prior) / max(len(normalized | prior), 1) >= 0.8 for prior in seen):
+            reasons.append("duplicate_question")
+            continue
+        seen.append(normalized)
+        accepted.append(EvidenceQuestion(question=question, anchor_fields=fields))
+        if len(accepted) >= max_questions:
+            break
+    return accepted, reasons
+
+
+def generate_evidence_query_plan(
+    use_case: CustomerUseCase,
+    settings: ExtractionSettings | None = None,
+    *,
+    timeout: int | None = None,
+    usage: dict[str, int] | None = None,
+) -> EvidenceQueryPlan:
+    """Generate complementary search questions in one selected-provider call."""
+    settings = settings or ExtractionSettings.from_env()
+    timeout = min(settings.timeout, timeout or settings.timeout)
+    checkout = Path(__file__).resolve().parents[2] / "prompts" / "retrieval_queries.md"
+    packaged = Path(__file__).parent / "data" / "prompts" / "retrieval_queries.md"
+    prompt_path = checkout if checkout.is_file() else packaged
+    try:
+        prompt = prompt_path.read_text(encoding="utf-8")
+    except OSError:
+        raise ProviderError("Retrieval query prompt is missing from the installation") from None
+    facts = {
+        field: value
+        for field in CUSTOMER_FACT_FIELDS
+        if (value := getattr(use_case, field)) is not None
+    }
+    request_data = {
+        "validated_customer_facts": facts,
+        "field_provenance": use_case.field_provenance,
+        "unknown_fields": missing_fields(use_case),
+        "strict_requirements": use_case.strict_requirements,
+        "available_anchor_fields": [
+            field for field in CUSTOMER_FACT_FIELDS if getattr(use_case, field)
+        ],
+        "source_text_untrusted": use_case.source_text,
+    }
+    query_schema = _query_plan_schema(use_case)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                prompt
+                + "\nAllowed anchor fields: "
+                + ", ".join(request_data["available_anchor_fields"])
+                + "\nOutput schema:\n"
+                + json.dumps(query_schema)
+            ),
+        },
+        {"role": "user", "content": json.dumps(request_data, ensure_ascii=False)},
+    ]
+    if len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 1024 > settings.context:
+        raise ProviderError("Retrieval query input exceeds configured assessment context budget")
+    if usage is not None:
+        usage["call_count"] = 1
+    if settings.provider == "openai":
+        from dataclasses import replace
+
+        content = _openai_json(
+            replace(settings, timeout=timeout, output_tokens=768),
+            messages,
+            query_schema,
+            usage=usage,
+            temperature=0,
+        )
+    else:
+        payload = {
+            "model": settings.model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+            "format": query_schema,
+            "options": {"num_ctx": settings.context, "num_predict": 768, "temperature": 0},
+        }
+        try:
+            result = ollama_request(
+                settings, "/api/chat", payload, timeout=timeout, lock_timeout=timeout
+            )
+        except TimeoutError as exc:
+            raise RetrievalDeadlineExceeded(str(exc)) from None
+        message = result.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if usage is not None:
+            for field, key in (
+                ("prompt_eval_count", "prompt_tokens"),
+                ("eval_count", "completion_tokens"),
+            ):
+                if isinstance(result.get(field), int):
+                    usage[key] = result[field]
+            usage["call_count"] = 1
+    if not isinstance(content, str):
+        raise ProviderError("Provider returned no retrieval query JSON")
+    return EvidenceQueryPlan.model_validate_json(content)
 
 
 def _strict_schema(schema: dict) -> dict:
@@ -427,7 +652,14 @@ def _clean_extraction(
     return cleaned
 
 
-def _openai_json(settings: ExtractionSettings, messages: list[dict], schema: dict) -> str:
+def _openai_json(
+    settings: ExtractionSettings,
+    messages: list[dict],
+    schema: dict,
+    *,
+    usage: dict[str, int] | None = None,
+    temperature: float | None = None,
+) -> str:
     if not settings.model or not os.getenv("OPENAI_API_KEY"):
         raise ProviderError("Set OPENAI_MODEL and OPENAI_API_KEY for OpenAI assessment.")
     try:
@@ -441,10 +673,10 @@ def _openai_json(settings: ExtractionSettings, messages: list[dict], schema: dic
             timeout=settings.timeout,
             max_retries=0,
         ) as client:
-            response = client.chat.completions.create(
-                model=settings.model,
-                messages=messages,
-                response_format={
+            options = {
+                "model": settings.model,
+                "messages": messages,
+                "response_format": {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "spectro_ai_output",
@@ -452,8 +684,16 @@ def _openai_json(settings: ExtractionSettings, messages: list[dict], schema: dic
                         "schema": _strict_schema(schema),
                     },
                 },
-                max_completion_tokens=settings.output_tokens,
-            )
+                "max_completion_tokens": settings.output_tokens,
+            }
+            if temperature is not None:
+                options["temperature"] = temperature
+            response = client.chat.completions.create(**options)
+            response_usage = getattr(response, "usage", None)
+            if usage is not None and response_usage is not None:
+                usage["prompt_tokens"] = response_usage.prompt_tokens
+                usage["completion_tokens"] = response_usage.completion_tokens
+                usage["call_count"] = 1
     except Exception:
         raise ProviderError(
             "OpenAI request failed. Check endpoint, model, credentials, timeout, "
@@ -563,8 +803,10 @@ class OpenAIUseCaseExtractor:
         raise ProviderError("OpenAI extraction failed after one structural retry.")
 
 
-def embedding_identity(settings: RagSettings) -> str:
-    result = ollama_request(settings, "/api/tags")
+def embedding_identity(
+    settings: RagSettings, *, timeout: int = 120, lock_timeout: float | None = None
+) -> str:
+    result = ollama_request(settings, "/api/tags", timeout=timeout, lock_timeout=lock_timeout)
     models = result.get("models")
     if not isinstance(models, list) or any(not isinstance(m, dict) for m in models):
         raise ProviderError("Ollama returned invalid model metadata")
@@ -574,7 +816,13 @@ def embedding_identity(settings: RagSettings) -> str:
     raise ProviderError("Embedding model unavailable. Run ollama pull " + settings.embedding_model)
 
 
-def embed_texts(settings: RagSettings, texts: list[str]) -> list[list[float]]:
+def embed_texts(
+    settings: RagSettings,
+    texts: list[str],
+    *,
+    timeout: int = 120,
+    lock_timeout: float | None = None,
+) -> list[list[float]]:
     result = ollama_request(
         settings,
         "/api/embed",
@@ -584,15 +832,13 @@ def embed_texts(settings: RagSettings, texts: list[str]) -> list[list[float]]:
             "truncate": False,
             "keep_alive": 0,
         },
+        timeout=timeout,
+        lock_timeout=lock_timeout,
     )
     vectors = result.get("embeddings")
     if not isinstance(vectors, list) or len(vectors) != len(texts):
         raise ProviderError("Ollama returned an invalid embedding count")
     return vectors
-
-
-class ProviderError(ValueError):
-    """A provider is unknown, incomplete, or deliberately unavailable."""
 
 
 class _CandidateDraft(TechniqueCandidate):
@@ -1063,6 +1309,7 @@ def _abstention_report(
     evidence_version: str | None = None,
     knowledge_index_revision: str | None = None,
     retrieval_diagnostics: list[dict] | None = None,
+    query_diagnostics: QueryDiagnostics | None = None,
 ) -> AssessmentReport:
     report = abstention_report(
         use_case,
@@ -1077,6 +1324,7 @@ def _abstention_report(
     report.retrieval_diagnostics = [
         RetrievalDiagnostic.model_validate(item) for item in (retrieval_diagnostics or [])
     ]
+    report.query_diagnostics = query_diagnostics
     return report
 
 
@@ -1208,6 +1456,7 @@ def assess_use_case(
     *,
     assessor: TechnicalAssessor | None = None,
     retriever: EvidenceRetriever | None = None,
+    query_generator: Callable[[CustomerUseCase], EvidenceQueryPlan] | None = None,
 ) -> AssessmentReport:
     """Assess an existing extracted/corrected case through current provider policy."""
     use_case = use_case.model_copy(deep=True)
@@ -1240,9 +1489,111 @@ def assess_use_case(
         index_revision = str(
             initial_metadata.get("revision") or initial_metadata["manifest_version"]
         )
-        retrieved, version = _verified_retrieval(
-            source, source.search(use_case, limit=retrieval_limit)
-        )
+        query_diagnostics = None
+        selected_questions: list[EvidenceQuestion] = []
+        if getattr(getattr(source, "settings", None), "multi_query", False):
+            from time import perf_counter
+
+            query_started = perf_counter()
+            generation_usage: dict[str, int] = {}
+            try:
+                query_settings = (
+                    None if query_generator is not None else ExtractionSettings.from_env()
+                )
+                max_total = getattr(source.settings, "multi_query_max_queries", 4)
+                query_timeout = getattr(source.settings, "multi_query_timeout", 30)
+                if query_generator is None:
+                    plan = generate_evidence_query_plan(
+                        use_case,
+                        query_settings,
+                        timeout=query_timeout,
+                        usage=generation_usage,
+                    )
+                else:
+                    plan = query_generator(use_case)
+                    if not isinstance(plan, EvidenceQueryPlan):
+                        plan = EvidenceQueryPlan.model_validate(plan)
+                selected_questions, rejected = validate_evidence_query_plan(
+                    plan, use_case, max_questions=min(3, max_total - 1)
+                )
+                query_diagnostics = QueryDiagnostics(
+                    status="fallback" if not selected_questions else "applied",
+                    accepted_questions=selected_questions,
+                    rejected_count=len(rejected),
+                    reason_codes=rejected
+                    if selected_questions
+                    else [*rejected, "no_useful_questions"],
+                    model_identity=(
+                        f"{query_settings.provider}:{query_settings.model}"
+                        if query_settings is not None
+                        else f"{provider}:injected"
+                    ),
+                    prompt_tokens=(
+                        generation_usage.get("prompt_tokens") if query_generator is None else None
+                    ),
+                    completion_tokens=(
+                        generation_usage.get("completion_tokens")
+                        if query_generator is None
+                        else None
+                    ),
+                    planner_call_count=(
+                        generation_usage.get("call_count", 1 if query_generator else 0)
+                    ),
+                    elapsed_ms=(perf_counter() - query_started) * 1000,
+                )
+            except (ProviderError, ValidationError, ValueError, TypeError) as exc:
+                query_diagnostics = QueryDiagnostics(
+                    status="fallback",
+                    reason_codes=["generation_failed"],
+                    model_identity=provider,
+                    planner_call_count=generation_usage.get(
+                        "call_count", 1 if query_generator else 0
+                    ),
+                    elapsed_ms=(perf_counter() - query_started) * 1000,
+                )
+                query_diagnostics.reason_codes.append(type(exc).__name__)
+
+        if selected_questions and query_diagnostics is not None:
+            try:
+                question_search = getattr(source, "search_questions", None)
+                if question_search is None:
+                    raise ValueError("Retriever does not support explicit evidence questions")
+                retrieved_raw = question_search(
+                    use_case,
+                    [item.question for item in selected_questions],
+                    limit=retrieval_limit,
+                    timeout=getattr(source.settings, "multi_query_search_timeout", 30),
+                )
+                last_diagnostics = getattr(source, "last_query_diagnostics", {})
+                if not last_diagnostics and hasattr(source, "retriever"):
+                    last_diagnostics = getattr(source.retriever, "last_query_diagnostics", {})
+                query_diagnostics.question_evidence = last_diagnostics.get("question_evidence", {})
+                query_diagnostics.candidate_count = last_diagnostics.get("candidate_count", 0)
+                query_diagnostics.unique_document_count = last_diagnostics.get(
+                    "unique_document_count", 0
+                )
+                query_diagnostics.selected_count = len(retrieved_raw)
+                if not retrieved_raw:
+                    query_diagnostics.status = "fallback"
+                    query_diagnostics.reason_codes.append("no_candidates")
+                    retrieved_raw = source.search(use_case, limit=retrieval_limit)
+                retrieved, version = _verified_retrieval(source, retrieved_raw)
+            except RetrievalDeadlineExceeded:
+                query_diagnostics.status = "fallback"
+                query_diagnostics.reason_codes.append("search_deadline")
+                retrieved, version = _verified_retrieval(
+                    source, source.search(use_case, limit=retrieval_limit)
+                )
+        else:
+            if query_diagnostics is None and getattr(
+                getattr(source, "settings", None), "multi_query", False
+            ):
+                query_diagnostics = QueryDiagnostics(
+                    status="fallback", reason_codes=["generation_failed"]
+                )
+            retrieved, version = _verified_retrieval(
+                source, source.search(use_case, limit=retrieval_limit)
+            )
         if not retrieved:
             retrieval_diagnostics = getattr(source, "retrieval_diagnostics", [])
             return _abstention_report(
@@ -1255,6 +1606,7 @@ def assess_use_case(
                 evidence_version=version,
                 knowledge_index_revision=index_revision,
                 retrieval_diagnostics=retrieval_diagnostics,
+                query_diagnostics=query_diagnostics,
             )
         selected_assessor = assessor or OllamaTechnicalAssessor()
         dropped_ids: list[str] = []
@@ -1276,6 +1628,7 @@ def assess_use_case(
                 evidence_version=version,
                 knowledge_index_revision=index_revision,
                 retrieval_diagnostics=retrieval_diagnostics,
+                query_diagnostics=query_diagnostics,
             )
             report.assessment_warnings.append(_budget_drop_warning(dropped_ids))
             return report
@@ -1668,6 +2021,7 @@ def assess_use_case(
                 RetrievalDiagnostic.model_validate(item)
                 for item in getattr(source, "retrieval_diagnostics", [])
             ],
+            query_diagnostics=query_diagnostics,
         )
     except (ProviderError, ValueError) as exc:
         raise ProviderError(f"Grounded assessment failed: {exc}") from None

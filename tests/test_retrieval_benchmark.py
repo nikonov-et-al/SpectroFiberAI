@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from spectro_ai.models import RetrievedEvidence
-from spectro_ai.providers import RagSettings
+from spectro_ai.providers import ExtractionSettings, RagSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -99,7 +99,18 @@ def test_stale_reviewed_labels_are_rejected():
 def test_benchmark_scores_candidates_beyond_legacy_cutoff_and_stable_ties():
     cases = {
         "status": "provisional_unreviewed",
-        "cases": [{"id": "q", "query": "query", "relevant": []}],
+        "cases": [
+            {
+                "id": "q",
+                "query": "query",
+                "relevant": [],
+                "validated_requirements": {
+                    "measurement_objective": "query",
+                    "target_analyte_or_property": "query",
+                    "sample_matrix": "query",
+                },
+            }
+        ],
     }
     settings = RagSettings(reranker="cross_encoder", reranker_candidates=12)
     retriever = _Retriever()
@@ -184,9 +195,20 @@ def test_reviewed_label_matches_exact_source_version_when_source_id_repeats():
     assert validate_labels(cases, snapshot)
 
 
+def test_incomplete_human_review_keeps_all_metrics_unavailable():
+    cases = {
+        "status": "human_reviewed",
+        "review_complete": False,
+        "cases": [{"id": "q", "query": "query", "relevant": []}],
+    }
+    assert validate_labels(cases, _Retriever().index_metadata()) is False
+    assert rank_metrics(["e1"], {"e1"}, False)["recall_at_8"] is None
+
+
 class _ReplacingIndexRetriever(_Retriever):
     def __init__(self) -> None:
         super().__init__()
+        self.settings = RagSettings()
         self.metadata_calls = 0
         self.pinned_revisions: list[str] = []
 
@@ -228,13 +250,295 @@ def test_metrics_use_fixed_precision_denominator_and_reviewed_recall():
     metrics = rank_metrics(["a", "x", "b"], {"a", "b"}, True, ["a", "x", "b", "b"])
     assert metrics == {
         "precision_at_5": 0.4,
+        "recall_at_8": 1.0,
         "recall_at_10": 1.0,
         "mrr": 1.0,
         "candidate_recall": 1.0,
     }
     assert rank_metrics([], set(), True) == {
         "precision_at_5": 0.0,
+        "recall_at_8": None,
         "recall_at_10": None,
         "mrr": None,
         "candidate_recall": None,
     }
+
+
+class _QuestionRetriever(_Retriever):
+    def __init__(self) -> None:
+        super().__init__()
+        self.settings = RagSettings()
+        self.question_calls = []
+
+    def _search_many(self, queries, limit, pinned_index=None, **kwargs):
+        return self.items[:limit]
+
+    def search_question_candidates(
+        self, use_case, questions, limit=30, timeout=30, include_anchor=True
+    ):
+        self.question_calls.append((list(questions), include_anchor))
+        self.last_query_diagnostics = {
+            "question_evidence": {question: [self.items[0].evidence_id] for question in questions},
+            "candidate_count": min(limit, len(self.items)),
+        }
+        return self.items[:limit]
+
+    def _search_questions(
+        self,
+        use_case,
+        questions,
+        limit,
+        timeout,
+        *,
+        include_anchor,
+        candidate_mode,
+        pinned_index=None,
+    ):
+        return self.search_question_candidates(
+            use_case, questions, limit=limit, timeout=timeout, include_anchor=include_anchor
+        )
+
+
+def test_query_modes_share_pinned_candidates_and_mocked_generation():
+    cases = {
+        "status": "provisional_unreviewed",
+        "cases": [
+            {
+                "id": "q",
+                "query": "query",
+                "relevant": [],
+                "validated_requirements": {
+                    "measurement_objective": "query",
+                    "target_analyte_or_property": "query",
+                    "sample_matrix": "query",
+                },
+            }
+        ],
+    }
+    retriever = _QuestionRetriever()
+    report = run_benchmark(
+        cases,
+        retriever,
+        settings=RagSettings(reranker="none", reranker_candidates=12),
+        multi_query=True,
+        query_generator=lambda _use_case: object(),
+        query_validator=lambda *_args, **_kwargs: (
+            [type("Q", (), {"question": "complementary"})()],
+            [],
+        ),
+        repeats=1,
+    )
+    modes = report["results"][0]["modes"]
+    assert modes["single_query"]["status"] == "available"
+    assert modes["grouped_pooled"]["status"] == "available"
+    assert modes["multi_query"]["generation"]["calls"] == 1
+    assert modes["multi_query"]["metrics"]["recall_at_8"] is None
+    assert modes["multi_query"]["information_need_coverage"] is None
+    assert modes["multi_query"]["context_bytes"]["total_serialized_context_bytes"] > 0
+    assert modes["multi_query"]["warm_latency_ms"]["scope"] == "retrieval_only_reusing_plan"
+    assert retriever.question_calls[0][0][0] == "query"
+    assert retriever.question_calls[0][1] is False
+    assert retriever.question_calls[-1] == (["complementary"], True)
+    assert report["resource_usage"]["process_cpu_seconds"] >= 0
+
+
+def test_information_need_coverage_requires_complete_reviewed_labels():
+    snapshot = _Retriever().index_metadata()
+    snapshot["chunks"] = [
+        {
+            "content_sha256": "hash",
+            "provenance": [
+                {"evidence_id": "e1", "source_id": "S01", "document_version": "version-1"}
+            ],
+        }
+    ]
+    cases = {
+        "status": "human_reviewed",
+        "cases": [
+            {
+                "id": "q",
+                "query": "query",
+                "relevant": [],
+                "needs_reviewed": True,
+                "information_needs": [
+                    {
+                        "id": "limitations",
+                        "relevant": [
+                            {
+                                "evidence_id": "e1",
+                                "source_id": "S01",
+                                "source_version": "version-1",
+                                "content_sha256": "hash",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    assert validate_labels(cases, snapshot)
+    assert benchmark._need_coverage(["e1"], cases["cases"][0], True) == 1.0
+    cases["cases"][0]["information_needs"][0]["relevant"][0]["source_version"] = "stale"
+    with pytest.raises(ValueError, match="Stale"):
+        validate_labels(cases, snapshot)
+
+
+def test_insufficient_case_skips_generated_call():
+    calls = []
+    report = run_benchmark(
+        {
+            "status": "provisional_unreviewed",
+            "cases": [{"id": "q", "query": "query", "relevant": []}],
+        },
+        _Retriever(),
+        settings=RagSettings(reranker="none"),
+        multi_query=True,
+        query_generator=lambda case: calls.append(case),
+        repeats=1,
+    )
+    mode = report["results"][0]["modes"]["multi_query"]
+    assert mode["status"] == "skipped_insufficient_information"
+    assert mode["generation"]["calls"] == 0
+    assert mode["metrics"] is None
+    assert mode["retrieval_only"] is True
+    assert report["aggregate_metrics"]["multi_query"]["recall_at_8"] is None
+    assert calls == []
+
+
+def test_default_generator_captures_usage_per_case(monkeypatch):
+    import spectro_ai.providers as providers
+
+    monkeypatch.setattr(
+        ExtractionSettings,
+        "from_env",
+        classmethod(lambda cls: ExtractionSettings(provider="ollama")),
+    )
+    call_number = 0
+
+    def generate(_case, _settings, *, timeout, usage):
+        nonlocal call_number
+        call_number += 1
+        usage.update(prompt_tokens=call_number * 10, completion_tokens=call_number)
+        return object()
+
+    monkeypatch.setattr(providers, "generate_evidence_query_plan", generate)
+    cases = {
+        "status": "provisional_unreviewed",
+        "cases": [
+            {
+                "id": f"q{number}",
+                "query": "query",
+                "relevant": [],
+                "validated_requirements": {
+                    "measurement_objective": "query",
+                    "target_analyte_or_property": "query",
+                    "sample_matrix": "query",
+                },
+            }
+            for number in range(2)
+        ],
+    }
+    report = run_benchmark(
+        cases,
+        _QuestionRetriever(),
+        settings=RagSettings(reranker="none"),
+        multi_query=True,
+        query_validator=lambda *_args, **_kwargs: (
+            [type("Q", (), {"question": "complementary"})()],
+            [],
+        ),
+        repeats=1,
+    )
+
+    generations = [row["modes"]["multi_query"]["generation"] for row in report["results"]]
+    assert [(entry["prompt_tokens"], entry["completion_tokens"]) for entry in generations] == [
+        (10, 1),
+        (20, 2),
+    ]
+
+
+def test_generation_timeout_records_baseline_fallback():
+    def timeout(_case):
+        raise TimeoutError("local model request timed out")
+
+    report = run_benchmark(
+        {
+            "status": "provisional_unreviewed",
+            "cases": [
+                {
+                    "id": "q",
+                    "query": "query",
+                    "relevant": [],
+                    "validated_requirements": {
+                        "measurement_objective": "query",
+                        "target_analyte_or_property": "query",
+                        "sample_matrix": "query",
+                    },
+                }
+            ],
+        },
+        _QuestionRetriever(),
+        settings=RagSettings(reranker="none"),
+        multi_query=True,
+        query_generator=timeout,
+        repeats=1,
+    )
+    modes = report["results"][0]["modes"]
+    assert modes["multi_query"]["status"] == "baseline_fallback"
+    assert modes["multi_query"]["evidence_ids"] == modes["grouped_baseline"]["evidence_ids"]
+    assert modes["multi_query"]["generation"]["fallback_reason"] == "TimeoutError"
+
+
+def test_reviewed_aggregate_accepts_disabled_modes_with_null_metrics():
+    aggregate = benchmark._aggregate(
+        [
+            {
+                "modes": {
+                    "legacy": {"metrics": {"recall_at_8": 1.0}},
+                    "multi_query": {"status": "disabled", "metrics": None},
+                }
+            }
+        ],
+        reviewed=True,
+    )
+    assert aggregate["legacy"]["recall_at_8"] == 1.0
+    assert aggregate["multi_query"]["recall_at_8"] is None
+
+
+def test_paired_metrics_exclude_insufficient_cases_and_include_fallbacks():
+    def row(case_id, baseline, multi_status, multi):
+        return {
+            "id": case_id,
+            "modes": {
+                "grouped_baseline": {"status": "available", "metrics": baseline},
+                "multi_query": {"status": multi_status, "metrics": multi},
+            },
+        }
+
+    rows = [
+        row("available", {"recall_at_8": 0.2}, "available", {"recall_at_8": 0.8}),
+        row("fallback", {"recall_at_8": 0.6}, "baseline_fallback", {"recall_at_8": 0.4}),
+        row("skipped", {"recall_at_8": 1.0}, "skipped_insufficient_information", None),
+    ]
+    case_ids, aggregates = benchmark._paired_aggregate(rows, reviewed=True)
+
+    assert case_ids == ["available", "fallback"]
+    assert aggregates["grouped_baseline"]["recall_at_8"] == 0.4
+    assert aggregates["multi_query"]["recall_at_8"] == pytest.approx(0.6)
+
+
+def test_fallback_timing_does_not_mutate_shared_baseline_timings():
+    baseline = {
+        "latency_ms": {"search": 5.0, "rerank": None},
+        "warm_latency_ms": {"search_mean": 5.0, "rerank_mean": None},
+    }
+    benchmark._finish_mode_timings(baseline)
+    fallback = {**baseline, "generation": {"latency_ms": 10.0}}
+    benchmark._finish_mode_timings(fallback)
+
+    assert baseline["latency_ms"]["end_to_end"] == 5.0
+    assert fallback["latency_ms"]["end_to_end"] == 15.0
+    assert baseline["warm_latency_ms"]["end_to_end_mean"] == 5.0
+    assert fallback["warm_latency_ms"]["end_to_end_mean"] == 5.0
+    assert fallback["latency_ms"] is not baseline["latency_ms"]
+    assert fallback["warm_latency_ms"] is not baseline["warm_latency_ms"]

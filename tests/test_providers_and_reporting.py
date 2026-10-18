@@ -1,7 +1,12 @@
 import pytest
 
 from spectro_ai.guardrails import abstention_report
-from spectro_ai.models import CustomerUseCase, RetrievalDiagnostic
+from spectro_ai.models import (
+    CustomerUseCase,
+    EvidenceQuestion,
+    QueryDiagnostics,
+    RetrievalDiagnostic,
+)
 from spectro_ai.providers import ProviderError, assess_problem
 from spectro_ai.reporting import render_markdown
 
@@ -60,3 +65,25 @@ def test_reranker_fallback_diagnostic_stays_in_technical_view() -> None:
     technical = render_markdown(report, include_diagnostics=True)
     assert "## Retrieval diagnostics" in technical
     assert "fallback reason: model cache missing" in technical
+
+
+def test_multi_query_details_stay_in_technical_view() -> None:
+    report = abstention_report(CustomerUseCase(), "Evidence is insufficient.")
+    report.query_diagnostics = QueryDiagnostics(
+        status="fallback",
+        accepted_questions=[
+            EvidenceQuestion(
+                question="Which sources discuss water concentration?",
+                anchor_fields=["target_analyte_or_property"],
+            )
+        ],
+        reason_codes=["search_deadline"],
+        candidate_count=5,
+        unique_document_count=2,
+        selected_count=3,
+    )
+    assert "water concentration" not in render_markdown(report)
+    technical = render_markdown(report, include_diagnostics=True)
+    assert "## Multi-query retrieval diagnostics" in technical
+    assert "search deadline" in technical
+    assert "water concentration" in technical

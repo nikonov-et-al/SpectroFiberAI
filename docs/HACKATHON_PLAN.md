@@ -136,6 +136,19 @@ No challenge dataset, instrument specification, or scientific suitability has be
 validated by adding retrieval. Scanned PDFs and complex tables need another workflow.
 # Assessment refinement — 2026-10-18
 
+## Experimental complementary retrieval — 2026-10-18
+
+Multi-query mode stays disabled by default. Generate up to three complementary
+evidence questions in one bounded request after validated requirements/corrections;
+reuse the existing pinned hybrid knowledge index and citation/context guards.
+This targets evidence coverage, not confidence or validated customer suitability.
+
+Demo use remains gated by human-reviewed, version-bound relevance labels, improved
+Recall@8/information-need coverage, no Precision@5/MRR or safety regressions, and
+recorded acceptable latency. Without those results, rehearse with existing grouped
+retrieval. Runtime smoke and offline tests do not satisfy scientific acceptance.
+No new challenge facts or hardware specifications are established.
+
 ## Optional reranker trial — 2026-10-18
 
 Add an opt-in English CPU cross-encoder trial after fused retrieval. Default retrieval

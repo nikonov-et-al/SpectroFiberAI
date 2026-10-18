@@ -783,3 +783,75 @@ Implemented offline scientific-context regressions through real synthetic ingest
 Final software acceptance: 200 tests passed, Ruff lint/format passed (63 files), Streamlit HTTP 200/ok and uv lock --check passed. Reproducible real AFS comparison used pinned schema 3 revision 9298e600933d4b35bdc1de85fde91245, seven files and 196 chunks, BM25 off/on with three warm repetitions. All retrieval totals remained below 12,000 bytes. Canonical provider verification passed; default complete-request fitting retained three children and no context in each case. No live generation or embedding requests.
 
 Usefulness not accepted: expected operating-condition and limitation statements were not recovered, and default provider budgets remove attached context. Precision/recall remain null without human relevance labels; expert review remains open. Original milestone stays pending in PLAN.md; expansion remains disabled. See docs/STRUCTURE_CONTEXT_REVIEW.md for measurements and source/PDF gate findings.
+
+## Completed — 2026-10-18 — M1 — Baseline characterization and shared retrieval hook
+
+### Exact original task text
+
+### M1 — Baseline characterization and shared retrieval hook
+
+**Prerequisite:** re-read current diff and coordinate with structure-work owner.
+
+Implement explicit-question/candidate entry points using existing engine. Extract shared final reranking/selection only where required.
+
+**Checks:** disabled path preserves IDs, order, scores, byte selection, call counts, snapshot behavior, and claim diagnostics. Candidate path bypasses early byte limits.
+
+**Compatibility/rollback:** existing APIs unchanged; unused new entry points removable independently.
+
+### Implementation, verification and deviations
+
+Implemented the approved disabled-by-default multi-query software path. Shared hybrid search, final reranking and parent-context selection preserve the grouped baseline; validated planner output stays outside customer facts and source evidence. Generation failure and optional search deadlines have visible retrieval-level fallback; index/embedding/assessment errors remain errors.
+
+Sol reviewed source, benchmark and offline integration results. `uv run --offline pytest --basetemp=.cache/pytest-mq-final-accepted -q`: 225 passed, including Streamlit AppTests. `uv run --offline ruff check .`: passed. `uv run --offline ruff format --check .`: passed (66 Python files). Temporary Streamlit health returned 200/ok and server stopped. Real local Ollama generated three accepted evidence questions, then hybrid retrieval and exact index membership checks returned eight technical excerpts within 7,604 bytes. One pinned index revision was used. No scientific applicability or retrieval-quality improvement is claimed.
+
+Deviation: M1–M3 were integrated and accepted together because shared typed interfaces and orchestration changed as one reversible feature; default remains off. Windows sandbox blocks loopback and test temp/socket operations; full tests and local runtime smokes ran outside it. Local request execution only; no paid requests or dependency changes. Existing committed structure work was reused rather than assuming the earlier uncommitted planning snapshot.
+
+## Completed — 2026-10-18 — M2 — Bounded question generation
+
+### Exact original task text
+
+### M2 — Bounded question generation
+
+**Prerequisite:** M1 accepted.
+
+Add prompt, models, settings, generation adapter, and deterministic validation.
+
+**Checks:** mocked Ollama/OpenAI outputs; zero/one/three questions; malformed output; duplicate variants; unsupported quantities; invalid anchors; prompt injection; timeout; oversized input; exactly one call; no provider switching.
+
+**Compatibility/rollback:** feature remains unwired/off; extraction output unchanged.
+
+### Implementation, verification and deviations
+
+Implemented the approved disabled-by-default multi-query software path. Shared hybrid search, final reranking and parent-context selection preserve the grouped baseline; validated planner output stays outside customer facts and source evidence. Generation failure and optional search deadlines have visible retrieval-level fallback; index/embedding/assessment errors remain errors.
+
+Sol reviewed source, benchmark and offline integration results. `uv run --offline pytest --basetemp=.cache/pytest-mq-final-accepted -q`: 225 passed, including Streamlit AppTests. `uv run --offline ruff check .`: passed. `uv run --offline ruff format --check .`: passed (66 Python files). Temporary Streamlit health returned 200/ok and server stopped. Real local Ollama generated three accepted evidence questions, then hybrid retrieval and exact index membership checks returned eight technical excerpts within 7,604 bytes. One pinned index revision was used. No scientific applicability or retrieval-quality improvement is claimed.
+
+Deviation: M1–M3 were integrated and accepted together because shared typed interfaces and orchestration changed as one reversible feature; default remains off. Windows sandbox blocks loopback and test temp/socket operations; full tests and local runtime smokes ran outside it. Local request execution only; no paid requests or dependency changes. Existing committed structure work was reused rather than assuming the earlier uncommitted planning snapshot.
+
+## Completed — 2026-10-18 — M3 — Opt-in assessment integration
+
+### Exact original task text
+
+### M3 — Opt-in assessment integration
+
+**Prerequisite:** M1–M2 accepted.
+
+Generate after sufficiency gate and corrections. Add pool consolidation, diagnostics, UI invalidation, technical exports, fallback, and conditional parent hook.
+
+**Checks:** one snapshot across all searches/verification; one initial rerank; bounded pool/count/bytes; repeated hits cannot gain votes; document diversity/refill; exact baseline fallback; correction invalidation; source-review/quotation integrity; abstention; conflicting evidence; old reports; four synthetic examples; Markdown/JSON and AppTest regressions.
+
+**Compatibility/rollback:** toggle off restores baseline. No database rollback required.
+
+### Implementation, verification and deviations
+
+Implemented the approved disabled-by-default multi-query software path. Shared hybrid search, final reranking and parent-context selection preserve the grouped baseline; validated planner output stays outside customer facts and source evidence. Generation failure and optional search deadlines have visible retrieval-level fallback; index/embedding/assessment errors remain errors.
+
+Sol reviewed source, benchmark and offline integration results. `uv run --offline pytest --basetemp=.cache/pytest-mq-final-accepted -q`: 225 passed, including Streamlit AppTests. `uv run --offline ruff check .`: passed. `uv run --offline ruff format --check .`: passed (66 Python files). Temporary Streamlit health returned 200/ok and server stopped. Real local Ollama generated three accepted evidence questions, then hybrid retrieval and exact index membership checks returned eight technical excerpts within 7,604 bytes. One pinned index revision was used. No scientific applicability or retrieval-quality improvement is claimed.
+
+Deviation: M1–M3 were integrated and accepted together because shared typed interfaces and orchestration changed as one reversible feature; default remains off. Windows sandbox blocks loopback and test temp/socket operations; full tests and local runtime smokes ran outside it. Local request execution only; no paid requests or dependency changes. Existing committed structure work was reused rather than assuming the earlier uncommitted planning snapshot.
+
+## Completed — 2026-10-18 — Multi-query benchmark software (M4 partial)
+
+Implemented pinned grouped-baseline, broad-query, grouped-pooling and complementary-query comparisons, preserving legacy output fields. Added Recall@8, reviewed information-need coverage, query overlap, document concentration, per-case token accounting, warm saved-plan timings and whole-process CPU/peak-memory diagnostics. Four new cases are explicitly synthetic; no relevance labels were invented.
+
+Local ten-case BM25/no-reranker benchmark completed: six generated plans used, four insufficient cases skipped generation. All quality metrics remain unavailable. Original M4 task stays in PLAN.md because human relevance labels and demo acceptance are absent. This accepts benchmark software only, not the full milestone. Ignored runtime records: .cache/multi-query/benchmark-bm25.json and smoke.json.

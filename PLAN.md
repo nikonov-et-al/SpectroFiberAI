@@ -1,5 +1,27 @@
 # Grounded LLM pipeline — pending acceptance
 
+## Multi-query retrieval — disabled-by-default experiment
+
+User-approved 2026-10-18. Preserve existing grouped retrieval, provider policy,
+scientific acceptance gates and all unrelated structure-ingestion work. Do not
+enable for the demo until reviewed relevance labels establish useful coverage.
+
+### M4 — Evaluation and demo decision
+
+**Prerequisite:** M3 software accepted; stable index generation and human-reviewed relevance labels available.
+
+Extend benchmark and run local model smoke. Record comparative results and explicit demo decision.
+
+**Checks:** fair budgets, reviewed coverage improvement, no observed provenance/scientific-context regression, acceptable recorded latency.
+
+**Compatibility/rollback:** remain disabled if gate fails; experimental code can remain opt-in.
+
+**Acceptance blocker — 2026-10-18:** M1–M3 software and benchmark implementation are accepted; local runtime smokes pass. Human-reviewed, index-bound relevance labels and expert usefulness review remain absent. Quality metrics are null; keep multi-query disabled and use grouped retrieval for the demo. No default-promotion or scientific gate is closed. See docs/MULTI_QUERY_RETRIEVAL.md.
+
+Software work may proceed without human labels; M4 acceptance cannot. For each
+accepted milestone, copy exact original text above into HISTORY.md before removal;
+record checks, deviations and a Conventional Commit. No quality claims from runtime.
+
 ## Structure-aware ingestion and bounded scientific context
 
 Implement five independently accepted milestones. Preserve existing retrieval APIs,

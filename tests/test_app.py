@@ -161,6 +161,21 @@ def test_reranker_configuration_change_invalidates_cached_report(monkeypatch):
     assert any("settings changed" in item.value.lower() for item in app.info)
 
 
+def test_multi_query_setting_invalidates_cached_report(monkeypatch):
+    monkeypatch.setenv("SPECTRO_RAG_MULTI_QUERY", "false")
+    monkeypatch.setattr(providers, "assess_problem", lambda text, **kwargs: _abstention(text))
+    app = AppTest.from_file(str(APP)).run()
+    assert any("Experimental multi-query retrieval: disabled" in item.value for item in app.caption)
+    app.text_area[0].input("We measure moisture in flour.").run()
+    app.button[1].click().run()
+    assert len(app.get("download_button")) == 2
+    monkeypatch.setenv("SPECTRO_RAG_MULTI_QUERY", "true")
+    app.run()
+    assert not app.get("download_button")
+    assert any("settings changed" in item.value.lower() for item in app.info)
+    assert any("Experimental multi-query retrieval: enabled" in item.value for item in app.caption)
+
+
 def test_provider_error_clears_report_and_openai_warns_before_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

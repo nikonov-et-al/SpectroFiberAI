@@ -283,6 +283,56 @@ and MRR remain `null`; runtime measurements alone establish no retrieval benefit
 See [architecture](docs/ARCHITECTURE.md), [decisions](docs/DECISIONS.md),
 [hackathon plan](docs/HACKATHON_PLAN.md), and [pending backlog](PLAN.md).
 
+### Experimental complementary evidence questions
+
+Multi-query retrieval is disabled by default. It makes one additional structured
+generation request after requirements extraction or expert corrections, then searches
+the existing knowledge index with the original-case anchor and up to three focused
+evidence questions. No additional dependency or index rebuild is needed.
+
+```powershell
+$env:SPECTRO_RAG_MULTI_QUERY = "true"
+$env:SPECTRO_RAG_MULTI_QUERY_MAX_QUERIES = "4"  # includes original-case anchor; 2–4
+$env:SPECTRO_RAG_MULTI_QUERY_TIMEOUT = "30"
+$env:SPECTRO_RAG_MULTI_QUERY_SEARCH_TIMEOUT = "30"
+uv run streamlit run app.py
+```
+
+Generation uses the explicitly selected assessment provider/model. Ollama works
+locally; OpenAI requires explicit configuration and sends the same customer-case
+data for this additional request. No provider switching or structural retry occurs.
+Set `SPECTRO_RAG_MULTI_QUERY=false` to restore unchanged grouped retrieval.
+
+Generated questions are exploratory search hypotheses, never customer requirements
+or scientific evidence. Invalid, duplicate-only or empty plans fall back visibly to
+existing grouped retrieval. Optional search deadline exhaustion also discards the
+partial pool before baseline retrieval; embedding/index/provider failures stay errors.
+Request budgets do not impose a hard total assessment deadline: baseline fallback,
+CPU reranking and assessment have their own runtimes.
+
+Candidate pooling avoids repeated-hit vote inflation, caps the consolidated pool
+using `SPECTRO_RAG_RERANK_CANDIDATES` (30 by default), and reranks once when enabled.
+Existing evidence-count, byte, parent-context and provider-fitting budgets remain.
+Technical diagnostics and JSON retain accepted questions and retrieval membership;
+customer Markdown omits query planning. Configuration changes invalidate reports.
+
+Quality improvement is unproven. Keep this mode out of the demonstration until
+human-reviewed, index-bound comparisons show coverage/Recall@8 gains without safety,
+Precision@5 or MRR regressions. See [evaluation protocol](docs/MULTI_QUERY_RETRIEVAL.md).
+
+Run the comparative benchmark with explicit local query generation:
+
+```powershell
+$env:SPECTRO_AI_PROVIDER = "ollama"
+uv run python scripts/benchmark_retrieval.py --multi-query --output .cache/multi-query-benchmark.json
+```
+
+Use `--bm25 --no-reranker --repeats 1` for a lighter runtime smoke. `--multi-query`
+still makes local generation requests; omitting it makes none. The benchmark CLI
+rejects cloud generation. Review `validated_requirements` in synthetic fixtures and
+label exact indexed passages before interpreting quality metrics. These manually
+specified facts evaluate retrieval/planning, not extraction accuracy.
+
 Current local run: [31-case LLM evaluation](docs/LLM_EVALUATION.md).
 
 Assessment presents a customer report and a separate Technical diagnostics tab.

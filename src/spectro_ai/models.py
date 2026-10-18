@@ -310,6 +310,31 @@ class RetrievalDiagnostic(DomainModel):
     failure_reason: str | None = None
 
 
+class EvidenceQuestion(DomainModel):
+    question: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=400)]
+    anchor_fields: list[Annotated[str, StringConstraints(strict=True)]] = Field(min_length=1)
+
+
+class EvidenceQueryPlan(DomainModel):
+    questions: list[EvidenceQuestion] = Field(default_factory=list, max_length=3)
+
+
+class QueryDiagnostics(DomainModel):
+    status: Literal["disabled", "applied", "fallback", "skipped"] = "disabled"
+    accepted_questions: list[EvidenceQuestion] = Field(default_factory=list)
+    rejected_count: int = 0
+    reason_codes: list[str] = Field(default_factory=list)
+    model_identity: str | None = None
+    elapsed_ms: float = 0
+    candidate_count: int = 0
+    selected_count: int = 0
+    unique_document_count: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    planner_call_count: int = 0
+    question_evidence: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class ValidationDiagnostic(DomainModel):
     level: Literal["error", "warning", "not_checked"]
     check: str
@@ -338,3 +363,4 @@ class AssessmentReport(DomainModel):
     assessment_warnings: list[str] = Field(default_factory=list)
     validation_diagnostics: list[ValidationDiagnostic] = Field(default_factory=list)
     retrieval_diagnostics: list[RetrievalDiagnostic] = Field(default_factory=list)
+    query_diagnostics: QueryDiagnostics | None = None
