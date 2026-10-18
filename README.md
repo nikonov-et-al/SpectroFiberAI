@@ -152,7 +152,13 @@ excerpts, RRF constant 60, and 12,000 UTF-8 bytes of excerpt context. Candidate 
 RRF and context budget can be supplied to `EvidenceRetriever`; final assessment count
 uses `SPECTRO_RAG_EVIDENCE_COUNT`. Chunking defaults to 1,200 characters with 180
 characters of overlap (`SPECTRO_RAG_CHUNK_SIZE`, `SPECTRO_RAG_CHUNK_OVERLAP`). Changing
-chunking or embedding identity requires an update and prevents unsafe vector reuse.
+chunking requires an explicit knowledge-base update. New updates write index schema
+3 with source block/section relationships; existing schema 2 indexes remain readable.
+Updates validate a staged database before atomic replacement, so failures preserve
+the previous usable index and running assessments retain their pinned snapshot.
+Parser/chunking changes trigger extraction again, but vectors can be reused when
+the exact embedding input and embedding configuration are unchanged. Model/config
+changes or invalid cached vectors prevent unsafe reuse.
 These defaults are engineering choices, not measured scientific optima.
 
 ### Optional local reranker (English trial)

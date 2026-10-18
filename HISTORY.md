@@ -656,3 +656,27 @@ were environment restrictions, not application regressions. No paid model calls
 were made. Cold timing includes scoring rather than claiming isolated model-load
 latency. Human relevance labels, default promotion, scientific acceptance and the
 existing Phase 3–5 expert/demo gates remain pending; no implementation task is blocked.
+
+
+## Completed — 2026-10-18 — Structure-aware milestone 1
+
+### Original milestone text
+
+### 1. Safe index evolution and vector reuse
+
+- Add typed source blocks, sections and locations; introduce schema version 3 with validated document/section/block relationships.
+- Continue reading version 2 indexes. Explicit knowledge-base updates create version 3 in staging, validate it, then atomically replace active database. Failed updates leave old index usable; pinned assessments retain their original snapshot.
+- Separate extraction fingerprint from embedding cache key. Parser/version/settings changes trigger re-extraction, but vectors remain reusable when **exact embedding input and complete embedding configuration** match.
+- Embedding identity covers provider, resolved model revision, preprocessing/options and vector dimension. Validate cached vectors before reuse.
+- Keep existing text as embedding input initially. Store document titles and heading paths as metadata; defer changing indexed text to avoid combining ingestion and ranking changes.
+- Preserve existing public IDs/contracts where unchanged; regenerate identities where passage content or provenance changes. Reject stale benchmark labels.
+
+**Acceptance:** version 2 compatibility, atomic replacement/failure recovery, pinned snapshots, unchanged-input vector reuse across parser upgrades, and changed-input/configuration invalidation all pass. Demo runs against either supported index version.
+
+### Implementation and verification
+
+Sol reviewed typed v3 structure records, file/provenance anchors and atomic replacement. Schema 2 remains readable, including the existing real AFS index; snapshots remain pinned during migration. Embedding reuse uses exact input plus provider/endpoint/model/revision/preprocessing/truncation configuration and validated dimensions, independently of parser/chunking version.
+
+Acceptance: 153 tests passed; `uv run ruff check .` passed; `uv run ruff format --check .` passed (53 files); Streamlit health smoke returned HTTP 200/ok. Full tests used an approved unsandboxed process after sandbox AppTest stalled.
+
+Deviation: schema 2 has no complete embedding-configuration record, so its vectors are conservatively rebuilt on migration; subsequent v3 parser updates reuse identical inputs. Active demo index was not migrated automatically.

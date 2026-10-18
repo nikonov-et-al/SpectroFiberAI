@@ -22,13 +22,22 @@ from xml.etree import ElementTree
 import yaml
 
 from spectro_ai.knowledge import KnowledgeSource
-from spectro_ai.models import CustomerUseCase, RetrievedEvidence, TechniqueKnowledge
+from spectro_ai.models import (
+    CustomerUseCase,
+    RetrievedEvidence,
+    SourceBlock,
+    SourceLocation,
+    SourceSection,
+    TechniqueKnowledge,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST = _ROOT / "knowledge" / "sources.yaml"
 _INDEX = _ROOT / ".cache" / "rag" / "index.sqlite3"
 _DOCUMENTS = _ROOT / "documents"
 _CHUNKING_VERSION = 3
+_INDEX_SCHEMA_VERSION = 3
+_SUPPORTED_CHUNKING_VERSIONS = {3}
 _CHUNK_SIZE = 1200
 _CHUNK_OVERLAP = 180
 _BANNED_FILES = {
@@ -79,6 +88,35 @@ _SYNONYMS = {
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _embedding_config(settings: Any, identity: str, dimension: int | None = None) -> dict[str, Any]:
+    return {
+        "provider": settings.provider,
+        "endpoint": settings.ollama_url,
+        "model": settings.embedding_model,
+        "revision": identity,
+        "input_encoding": "utf-8",
+        "input_preprocessing": "exact-text-v1",
+        "truncate": False,
+        "dimension": dimension,
+    }
+
+
+def _extraction_fingerprint(chunk_size: int, chunk_overlap: int) -> str:
+    settings = {
+        "extractors": {
+            "pdf": "pypdf-v1",
+            "markdown": "markdown-v1",
+            "txt": "txt-v1",
+            "docx": "docx-v1",
+            "xlsx": "xlsx-v1",
+        },
+        "chunking_version": _CHUNKING_VERSION,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+    }
+    return _sha256(json.dumps(settings, sort_keys=True).encode())
 
 
 def _load_manifest(path: Path) -> tuple[Path, list[dict[str, Any]]]:
@@ -452,27 +490,62 @@ def _update_index(
         old_meta, old_chunks = {}, {}
     if force_rebuild:
         old_meta, old_chunks = {}, {}
-    if old_meta.get("schema_version") != 2:
+    if old_meta.get("schema_version") not in {2, _INDEX_SCHEMA_VERSION}:
         old_chunks = {}
     settings = settings or providers.RagSettings.from_env()
     chunk_size = int(os.getenv("SPECTRO_RAG_CHUNK_SIZE", _CHUNK_SIZE))
     chunk_overlap = int(os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP))
     _split_text("config validation", chunk_size, chunk_overlap)
     identity = providers.embedding_identity(settings) if semantic else "bm25-only"
+    current_embedding_config = _embedding_config(settings, identity)
+    reusable_vectors: dict[str, list[float]] = {}
     if (
-        old_meta
-        and semantic
-        and (
-            old_meta.get("embedding_identity") != identity
-            or old_meta.get("chunking_version") != _CHUNKING_VERSION
-            or old_meta.get("chunk_size") != chunk_size
-            or old_meta.get("chunk_overlap") != chunk_overlap
-        )
+        semantic
+        and old_meta.get("embedding_model") == settings.embedding_model
+        and old_meta.get("embedding_identity") == identity
+        and old_meta.get("schema_version") == _INDEX_SCHEMA_VERSION
+        and {
+            key: value
+            for key, value in old_meta.get("embedding_configuration", {}).items()
+            if key != "dimension"
+        }
+        == {key: value for key, value in current_embedding_config.items() if key != "dimension"}
     ):
-        old_chunks = {}
+        previous_dimension = old_meta.get("embedding_dimension")
+        previous_config = old_meta.get("embedding_configuration")
+        if (
+            isinstance(previous_dimension, int)
+            and previous_dimension > 0
+            and isinstance(previous_config, dict)
+            and previous_config.get("dimension") == previous_dimension
+        ):
+            for old in old_chunks.values():
+                vector = old.get("vector")
+                chunk = old.get("chunk", {})
+                if (
+                    isinstance(vector, list)
+                    and len(vector) == previous_dimension
+                    and vector
+                    and (
+                        chunk.get("embedding_input_sha256")
+                        == _sha256(str(chunk.get("text", "")).encode("utf-8"))
+                    )
+                    and all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(float(value))
+                        for value in vector
+                    )
+                    and math.hypot(*vector)
+                ):
+                    reusable_vectors.setdefault(
+                        _sha256(str(chunk.get("text", "")).encode("utf-8")), vector
+                    )
     files: list[dict[str, Any]] = []
     missing: list[dict[str, str]] = []
     chunks: dict[str, dict[str, Any]] = {}
+    source_sections: dict[str, dict[str, Any]] = {}
+    source_blocks: dict[str, dict[str, Any]] = {}
     for source in sources:
         filename = str(source["filename"])
         source_root = Path(source.get("_root", root))
@@ -504,6 +577,7 @@ def _update_index(
             "related_source": source.get("related_source"),
             "citation_format": source.get("citation_format"),
             "document_version": version,
+            "document_id": _sha256(f"{source_id}:{filename}:{version}".encode()),
             "page_count": max(page_numbers, default=0),
             "empty_pages": empty_pages,
             "poor_extraction_pages": poor_pages,
@@ -521,11 +595,47 @@ def _update_index(
                 {
                     "content_sha256": content_hash,
                     "text": excerpt,
+                    "embedding_input_sha256": _sha256(excerpt.encode("utf-8")),
                     "provenance": [],
                     "chunk_id": chunk_id,
                 },
             )
             evidence_id = f"{source_id}-{path.stem}-{version[:12]}-{number:04d}"
+            document_id = _sha256(f"{source_id}:{filename}:{version}".encode())
+            section_locator = re.sub(r"\s*\(chunk \d+/\d+\)$", "", locator)
+            heading = re.search(r"section=([^;]+)", section_locator)
+            heading_path = [heading.group(1).strip()] if heading else []
+            section_id = _sha256(
+                f"{document_id}:{section_locator}:{json.dumps(heading_path)}".encode()
+            )
+            block_id = _sha256(f"{document_id}:{number}:{locator}:{content_hash}".encode())
+            location = SourceLocation(
+                source_id=source_id,
+                filename=filename,
+                document_version=version,
+                locator=locator,
+            )
+            section = SourceSection(
+                section_id=section_id,
+                document_id=document_id,
+                source_id=source_id,
+                filename=filename,
+                document_version=version,
+                heading_path=heading_path,
+            )
+            source_sections.setdefault(section_id, section.model_dump())
+            source_sections[section_id]["block_ids"].append(block_id)
+            source_blocks[block_id] = SourceBlock(
+                block_id=block_id,
+                document_id=document_id,
+                section_id=section_id,
+                source_id=source_id,
+                filename=filename,
+                document_version=version,
+                ordinal=number - 1,
+                text=excerpt,
+                location=location,
+            ).model_dump()
             page_match = re.match(r"p\.(\d+)", locator)
             review = (
                 review_overrides.get(page_match.group(1), file_record["review_status"])
@@ -545,19 +655,22 @@ def _update_index(
                 "filename": filename,
                 "related_source": source.get("related_source"),
                 "citation_format": source.get("citation_format"),
+                "block_id": block_id,
+                "section_id": section_id,
             }
             if provenance not in item["provenance"]:
                 item["provenance"].append(provenance)
     pending = [
         chunk
         for chunk in chunks.values()
-        if chunk["chunk_id"] not in old_chunks
-        or "bm25-only" in {identity, old_meta.get("embedding_identity")}
-        and semantic
+        if not semantic or chunk["embedding_input_sha256"] not in reusable_vectors
     ]
     vectors: dict[str, list[float]] = {}
-    for key, value in old_chunks.items():
-        vectors[key] = value["vector"]
+    if semantic:
+        for chunk in chunks.values():
+            vector = reusable_vectors.get(chunk["embedding_input_sha256"])
+            if vector is not None:
+                vectors[chunk["chunk_id"]] = vector
     if semantic:
         for start in range(0, len(pending), 16):
             batch = pending[start : start + 16]
@@ -584,13 +697,23 @@ def _update_index(
         vectors = {chunk["chunk_id"]: [] for chunk in chunks.values()}
     manifest_version = _sha256(manifest_path.read_bytes())
     metadata = {
-        "schema_version": 2,
+        "schema_version": _INDEX_SCHEMA_VERSION,
         "manifest_version": manifest_version,
         "files": files,
         "missing_sources": missing,
         "embedding_model": settings.embedding_model if semantic else None,
         "embedding_identity": identity,
         "embedding_dimension": len(next(iter(vectors.values()))) if vectors and semantic else 0,
+        "embedding_configuration": (
+            _embedding_config(
+                settings,
+                identity,
+                len(next(iter(vectors.values()))) if vectors else 0,
+            )
+            if semantic
+            else None
+        ),
+        "extraction_fingerprint": _extraction_fingerprint(chunk_size, chunk_overlap),
         "chunking_version": _CHUNKING_VERSION,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
@@ -598,6 +721,8 @@ def _update_index(
         "indexed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "chunks": len(chunks),
         "documents": len(files),
+        "sections": list(source_sections.values()),
+        "source_blocks": list(source_blocks.values()),
     }
     index_path.parent.mkdir(parents=True, exist_ok=True)
     staging = index_path.with_name(index_path.name + "." + uuid.uuid4().hex + ".tmp")
@@ -639,7 +764,9 @@ def _validate_database(
     path: Path, loaded: tuple[dict[str, Any], dict[str, dict[str, Any]]] | None = None
 ) -> None:
     meta, chunks = loaded or _load_old_index(path)
-    if meta.get("schema_version") != 2 or meta.get("chunks") != len(chunks):
+    if meta.get("schema_version") not in {2, _INDEX_SCHEMA_VERSION} or meta.get("chunks") != len(
+        chunks
+    ):
         raise ValueError("Staged knowledge index failed validation")
     dimension = meta.get("embedding_dimension")
     for chunk in chunks.values():
@@ -661,6 +788,97 @@ def _validate_database(
             or math.hypot(*vector) == 0
         ):
             raise ValueError("Staged knowledge index contains invalid embeddings")
+    if meta.get("schema_version") == _INDEX_SCHEMA_VERSION:
+        configuration = meta.get("embedding_configuration")
+        if meta.get("embedding_model") is None:
+            if configuration is not None:
+                raise ValueError("Staged knowledge index has invalid embedding configuration")
+        elif (
+            not isinstance(configuration, dict)
+            or configuration.get("dimension") != dimension
+            or configuration.get("revision") != meta.get("embedding_identity")
+            or configuration.get("model") != meta.get("embedding_model")
+        ):
+            raise ValueError("Staged knowledge index has invalid embedding configuration")
+        sections = meta.get("sections")
+        blocks = meta.get("source_blocks")
+        if not isinstance(sections, list) or not isinstance(blocks, list):
+            raise ValueError("Staged knowledge index has invalid structure records")
+        try:
+            parsed_sections = [SourceSection.model_validate(item) for item in sections]
+            parsed_blocks = [SourceBlock.model_validate(item) for item in blocks]
+        except Exception as exc:
+            raise ValueError("Staged knowledge index has invalid structure records") from exc
+        section_map = {item.section_id: item for item in parsed_sections}
+        block_map = {item.block_id: item for item in parsed_blocks}
+        if len(section_map) != len(parsed_sections) or len(block_map) != len(parsed_blocks):
+            raise ValueError("Staged knowledge index has duplicate structure IDs")
+        block_memberships = Counter(
+            block_id for section in parsed_sections for block_id in section.block_ids
+        )
+        files_by_identity = {
+            (item.get("source_id"), item.get("filename"), item.get("document_version")): item
+            for item in meta.get("files", [])
+            if isinstance(item, dict)
+        }
+        for section in parsed_sections:
+            file_record = files_by_identity.get(
+                (section.source_id, section.filename, section.document_version)
+            )
+            if (
+                file_record is None
+                or file_record.get("document_id") != section.document_id
+                or section.document_id
+                != _sha256(
+                    f"{section.source_id}:{section.filename}:{section.document_version}".encode()
+                )
+                or len(section.block_ids) != len(set(section.block_ids))
+                or any(block_id not in block_map for block_id in section.block_ids)
+                or [block_map[block_id].ordinal for block_id in section.block_ids]
+                != sorted(block_map[block_id].ordinal for block_id in section.block_ids)
+            ):
+                raise ValueError("Staged knowledge index has dangling section blocks")
+        for block in parsed_blocks:
+            section = section_map.get(block.section_id)
+            provenance_locator = next(
+                (
+                    provenance.get("page_or_section")
+                    for chunk in chunks.values()
+                    for provenance in chunk["chunk"].get("provenance", [])
+                    if provenance.get("block_id") == block.block_id
+                ),
+                None,
+            )
+            if (
+                block_memberships.get(block.block_id) != 1
+                or section is None
+                or section.document_id != block.document_id
+                or block.block_id not in section.block_ids
+                or section.source_id != block.source_id
+                or section.filename != block.filename
+                or section.document_version != block.document_version
+                or block.location.source_id != block.source_id
+                or block.location.filename != block.filename
+                or block.location.document_version != block.document_version
+                or block.location.locator != provenance_locator
+            ):
+                raise ValueError(
+                    "Evidence citation points outside source pages or disagrees with its block"
+                )
+        for chunk in chunks.values():
+            for provenance in chunk["chunk"].get("provenance", []):
+                block = block_map.get(provenance.get("block_id"))
+                if block and provenance.get("document_version") != block.document_version:
+                    raise ValueError("Evidence citation points to an unknown source version")
+                if (
+                    block is None
+                    or provenance.get("section_id") != block.section_id
+                    or provenance.get("source_id") != block.source_id
+                    or provenance.get("filename") != block.filename
+                    or provenance.get("document_version") != block.document_version
+                    or block.text != chunk["chunk"].get("text")
+                ):
+                    raise ValueError("Staged knowledge index has inconsistent chunk provenance")
 
 
 def _tokens(text: str) -> list[str]:
@@ -771,7 +989,9 @@ class EvidenceRetriever:
             index["vectors"] = {key: row["vector"] for key, row in rows.items()}
         except (OSError, ValueError) as exc:
             raise ValueError(f"Cannot read evidence index {self.index_path}: {exc}") from exc
-        if index.get("schema_version") != 2 or index.get("chunking_version") != _CHUNKING_VERSION:
+        if index.get("schema_version") not in {2, _INDEX_SCHEMA_VERSION} or index.get(
+            "chunking_version"
+        ) not in {*_SUPPORTED_CHUNKING_VERSIONS, _CHUNKING_VERSION}:
             raise ValueError(
                 "Knowledge index schema is unsupported or stale; run Update Knowledge Base"
             )
@@ -781,6 +1001,12 @@ class EvidenceRetriever:
             os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP)
         ):
             raise ValueError("Knowledge index chunking settings changed; run Update Knowledge Base")
+        if index.get("schema_version") == _INDEX_SCHEMA_VERSION and index.get(
+            "extraction_fingerprint"
+        ) != _extraction_fingerprint(int(index["chunk_size"]), int(index["chunk_overlap"])):
+            raise ValueError(
+                "Knowledge index extraction settings changed; run Update Knowledge Base"
+            )
         if not all(
             isinstance(index.get(key), list) for key in ("files", "missing_sources", "chunks")
         ):
@@ -928,6 +1154,14 @@ class EvidenceRetriever:
                 raise ValueError("Embedding model changed; run Update Knowledge Base")
             if providers.embedding_identity(self.settings) != index.get("embedding_identity"):
                 raise ValueError("Embedding model revision changed; run Update Knowledge Base")
+            if index.get("schema_version") == _INDEX_SCHEMA_VERSION and index.get(
+                "embedding_configuration"
+            ) != _embedding_config(
+                self.settings,
+                index["embedding_identity"],
+                index["embedding_dimension"],
+            ):
+                raise ValueError("Embedding configuration changed; run Update Knowledge Base")
         found: dict[str, tuple[float, RetrievedEvidence]] = {}
         reranking = self.settings.reranker == "cross_encoder" and not candidate_mode
         candidate_limit = (

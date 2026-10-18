@@ -131,7 +131,8 @@ def test_schema_chunking_compatibility_and_snapshot_revision(tmp_path, monkeypat
     with pytest.raises(ValueError, match="chunking settings changed"):
         retriever.index_metadata()
     rebuilt = retriever.update_knowledge_base()
-    assert rebuilt["embeddings"]["new"] == rebuilt["chunks"]
+    assert rebuilt["embeddings"]["new"] == 0
+    assert rebuilt["embeddings"]["reused"] == rebuilt["chunks"]
     with closing(sqlite3.connect(index)) as db:
         metadata = json.loads(db.execute("SELECT value FROM metadata").fetchone()[0])
         metadata["schema_version"] = 99
@@ -140,6 +141,95 @@ def test_schema_chunking_compatibility_and_snapshot_revision(tmp_path, monkeypat
     assert not retriever.knowledge_status()["ready"]
     retriever.update_knowledge_base()
     assert retriever.knowledge_status()["ready"]
+
+
+def test_v3_structure_records_validate_and_v2_index_remains_readable(tmp_path, monkeypatch):
+    retriever, documents, index_path = setup_store(tmp_path, monkeypatch)
+    (documents / "source.md").write_text("# Heading\n\nA cited statement.", encoding="utf-8")
+    retriever.update_knowledge_base()
+    current = retriever.index_metadata()
+    assert current["schema_version"] == 3
+    block = current["source_blocks"][0]
+    section = current["sections"][0]
+    assert block["block_id"] in section["block_ids"]
+    assert block["section_id"] == section["section_id"]
+    assert current["chunks"][0]["provenance"][0]["block_id"] == block["block_id"]
+    with closing(sqlite3.connect(index_path)) as db:
+        original_metadata = db.execute("SELECT value FROM metadata").fetchone()[0]
+        broken = json.loads(original_metadata)
+        broken["sections"][0]["block_ids"][0] = "dangling-block"
+        db.execute("UPDATE metadata SET value = ?", (json.dumps(broken),))
+        db.commit()
+    with pytest.raises(ValueError, match="dangling section blocks"):
+        retriever.index_metadata()
+    with closing(sqlite3.connect(index_path)) as db:
+        db.execute("UPDATE metadata SET value = ?", (original_metadata,))
+        db.commit()
+
+    # A v2 index lacks full embedding configuration, so migration rebuilds its vectors safely.
+    with closing(sqlite3.connect(index_path)) as db, db:
+        meta = json.loads(db.execute("SELECT value FROM metadata").fetchone()[0])
+        meta["schema_version"] = 2
+        meta.pop("sections")
+        meta.pop("source_blocks")
+        for file_record in meta["files"]:
+            file_record.pop("document_id")
+        db.execute("UPDATE metadata SET value = ?", (json.dumps(meta),))
+        rows = db.execute("SELECT id, chunk FROM chunks").fetchall()
+        for chunk_id, payload in rows:
+            chunk = json.loads(payload)
+            chunk.pop("embedding_input_sha256", None)
+            for provenance in chunk["provenance"]:
+                provenance.pop("block_id", None)
+                provenance.pop("section_id", None)
+            db.execute("UPDATE chunks SET chunk = ? WHERE id = ?", (json.dumps(chunk), chunk_id))
+    assert retriever.index_metadata()["schema_version"] == 2
+    v2_snapshot = retriever.snapshot()
+    migrated = retriever.update_knowledge_base()
+    assert migrated["schema_version"] == 3
+    assert migrated["embeddings"]["new"] == migrated["chunks"]
+    assert v2_snapshot.index_metadata()["schema_version"] == 2
+    assert len(v2_snapshot.index_metadata()["chunks"]) == 1
+    assert retriever.knowledge_status()["ready"]
+
+
+def test_parser_version_change_reuses_vectors_for_identical_embedding_input(tmp_path, monkeypatch):
+    calls = []
+    retriever, documents, _ = setup_store(
+        tmp_path, monkeypatch, lambda _, texts: calls.extend(texts) or [[1.0, 0.0] for _ in texts]
+    )
+    (documents / "source.txt").write_text("Stable source text.", encoding="utf-8")
+    retriever.update_knowledge_base()
+    assert len(calls) == 1
+
+    old_chunk_id = retriever.index_metadata()["chunks"][0]["chunk_id"]
+    monkeypatch.setattr(evidence, "_CHUNKING_VERSION", evidence._CHUNKING_VERSION + 1)
+    rebuilt = retriever.update_knowledge_base()
+    assert rebuilt["embeddings"] == {"new": 0, "reused": 1}
+    assert len(calls) == 1
+    assert retriever.index_metadata()["chunks"][0]["chunk_id"] != old_chunk_id
+
+
+def test_vector_reuse_rejects_changed_identity_and_invalid_dimension(tmp_path, monkeypatch):
+    calls = []
+    retriever, documents, index = setup_store(
+        tmp_path, monkeypatch, lambda _, texts: calls.extend(texts) or [[1.0, 0.0] for _ in texts]
+    )
+    source = documents / "source.txt"
+    source.write_text("Stable source text.", encoding="utf-8")
+    retriever.update_knowledge_base()
+    assert len(calls) == 1
+
+    with closing(sqlite3.connect(index)) as db, db:
+        db.execute("UPDATE chunks SET vector = '[1.0, 0.0, 1.0]'")
+    refreshed = retriever.update_knowledge_base()
+    assert refreshed["embeddings"] == {"new": 1, "reused": 0}
+    assert len(calls) == 2
+
+    monkeypatch.setattr(providers, "embedding_identity", lambda _: "other-model-digest")
+    refreshed = retriever.update_knowledge_base()
+    assert refreshed["embeddings"] == {"new": 1, "reused": 0}
+    assert len(calls) == 3
 
 
 def test_duplicate_chunk_keeps_provenance_without_duplicate_hit(tmp_path, monkeypatch):

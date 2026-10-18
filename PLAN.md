@@ -1,5 +1,66 @@
 # Grounded LLM pipeline — pending acceptance
 
+## Structure-aware ingestion and bounded scientific context
+
+Implement five independently accepted milestones. Preserve existing retrieval APIs,
+BM25/semantic/RRF behavior, reranker fallback, assessment errors/abstention, citation
+guards and Markdown/JSON exports. Do not reinstate removed provider fallbacks.
+Keep the demo functional after every milestone. Parent expansion defaults off.
+
+### 2. PDF and Markdown ingestion
+
+- Add locked Docling dependencies and explicit local-model setup. Verify Windows/Python 3.14 compatibility before switching PDF default.
+- Configure CPU conversion, table extraction, local assets, OCR disabled and remote services disabled. Keep explicit `pypdf` backend available for compatibility and comparison; never silently switch backend after an error.
+- Explicitly enable `HeadingHierarchyOptions(enabled=True)` and `generate_parsed_pages=True`; explicitly configure bookmark, numbering and style signals. Pin resolved settings in extraction fingerprint. Docling otherwise leaves PDF headings flat by default. [Official heading documentation](https://docling-project.github.io/docling/usage/heading_levels/)
+- Treat inferred nesting as extraction output requiring validation. Check levels, source order, page bounds, parent relationships and numbering consistency; retain diagnostics and original detected levels.
+- On invalid/ambiguous nesting, use flat page-local sections and suppress cross-section expansion. Do not invent corrected hierarchy. Visually compare extracted outlines with actual AFS pages before acceptance.
+- Preserve PDF paragraphs, table headers, rows, captions and original block/page locations. Preserve Markdown heading hierarchy, paragraphs, lists, fenced blocks and tables.
+- Keep 1,200-character target and existing overlap setting. Pack within structural boundaries; overlap applies only to split prose. Split large tables by rows, repeating source headers. Preserve and flag indivisible oversized rows.
+- Keep TXT, DOCX and XLSX behavior unchanged during this milestone.
+
+**Acceptance:** fixture coverage and real AFS inspection establish correct reading order, heading boundaries and table/value associations. Full suite and demo smoke pass before Docling becomes default.
+
+### 3. Parent context, disabled by default
+
+- Add `SPECTRO_RAG_PARENT_EXPANSION=false`. Disabled path retains existing selection and budgeting behavior.
+- Attach context to its retrieved child using optional typed `context_blocks` containing text, block identity, exact locations and review metadata. Existing evidence fields remain valid; missing collections default to empty lists.
+- Parents/context receive no independent retrieval score or evidence count. Never count child and parent as separate corroborating sources.
+- With expansion enabled, reserve **30% of existing retrieval byte budget before child selection**. Rank/rerank children normally; bypass premature per-query byte truncation, then select children within remaining 70% and existing child-count limit.
+- Allocate reserved capacity in child-rank order. Attach full section when it fits; otherwise construct contiguous source-block window around child, growing outward by block distance, preceding block first on ties.
+- Preserve whole blocks and table header/row associations. Do not cross document or validated section boundaries. Deduplicate shared context blocks; retain each block's review status and precise locations.
+- If no complete surrounding block fits, record omission. Reuse unused capacity for additional ranked children only after expansion allocation.
+- Charge serialized context against retrieval and provider budgets. Final provider fitting drops complete optional context blocks before children; never silently slices source text.
+- Verify context against pinned stored blocks before assessment. Permit quotations only from verified child/context text and bind quotations to exact contributing locations.
+- Show attached context in diagnostics/UI and exports without presenting another independent source. Existing reports without context retain their current rendering.
+
+**Acceptance:** reservation, windows, ordering, deduplication, provenance validation, count limits, byte limits and provider fitting pass. Expansion remains disabled after software acceptance.
+
+### 4. Scientific-context regression and AFS usefulness gate
+
+- Add offline end-to-end tests through ingestion → retrieval → prompt construction → mocked assessment → validation → exports.
+- Cover table headers and values, customer/source units, device identity, operating conditions, calibration limits, nearby qualifications and contradictory/limiting passages.
+- Include adversarial cases: value separated from unit; limitation immediately after claim; similar values on different pages; ambiguous headings; multi-page tables; tampered block references; repeated parent context falsely presented as corroboration.
+- Assert exact document version and page/line/block provenance, no title-only quotation support, unchanged source-review status, and correct abstention/unsupported-claim behavior.
+- Run expansion-off/on comparisons against pinned real AFS indexes. Review at least one table/specification question, one operating-condition question and one limitation question; record expected source passages before comparing outputs.
+- Require useful surrounding context on reviewed cases, no observed citation/context regressions, and recorded latency/context-volume results. Retrieval metrics require human-reviewed, index-bound labels.
+- Keep default disabled unless regression checks pass **and** real-document review demonstrates usefulness. Enabling default requires a separately recorded acceptance decision.
+
+**Acceptance:** reproducible test results and reviewed AFS examples exist. Software success alone does not close scientific acceptance gates.
+
+### 5. Broader format improvements
+
+- Extend shared block packing to DOCX headings/paragraphs/tables, XLSX worksheets/rows/explicit headers, and TXT paragraphs with original line locations.
+- Preserve cell positions, empty cells and customer units; do not infer absent headers or scientific meaning.
+- Keep curated YAML technique profiles as structured records.
+- Apply same provenance, vector-reuse, context-window and scientific-context tests.
+
+**Acceptance:** format-specific regressions pass, existing examples/exports remain usable, and demo smoke succeeds.
+
+Each milestone requires targeted tests, full pytest, Ruff lint/format, demo smoke,
+Sol review and a Conventional Commit. Preserve unrelated work. Copy each accepted
+milestone's exact original text into HISTORY.md before removing it here.
+
+
 Updated: 2026-10-18. User-approved architecture replaces every earlier requirement
 for an offline parser, baseline recommender, or automatic provider fallback.
 

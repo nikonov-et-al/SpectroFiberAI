@@ -11,6 +11,12 @@ open. Prior counts below are historical.
 
 ## Foundation implemented
 
+Structure-aware ingestion is being delivered in independently verified milestones.
+Schema 3 adds source block/section relationships while retaining schema 2 reading;
+updates remain explicit and atomic. PDF/Markdown structure and bounded parent
+context are next. Parent expansion defaults off until regression and real-source
+review gates pass; this work does not establish scientific acceptance.
+
 - Python 3.14 with uv-managed locked dependencies.
 - Typed requirements, candidates, evidence, feasibility plans, reports.
 - LLM-only extraction and grounded assessment; deterministic missing-field checks and explicit abstention.

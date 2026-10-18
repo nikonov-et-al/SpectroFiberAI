@@ -42,6 +42,35 @@ class DomainModel(BaseModel):
         return value
 
 
+class SourceLocation(DomainModel):
+    source_id: str
+    filename: str
+    document_version: str
+    locator: str
+
+
+class SourceSection(DomainModel):
+    section_id: str
+    document_id: str
+    source_id: str
+    filename: str
+    document_version: str
+    heading_path: list[str] = Field(default_factory=list)
+    block_ids: list[str] = Field(default_factory=list)
+
+
+class SourceBlock(DomainModel):
+    block_id: str
+    document_id: str
+    section_id: str
+    source_id: str
+    filename: str
+    document_version: str
+    ordinal: int = Field(ge=0)
+    text: str
+    location: SourceLocation
+
+
 CUSTOMER_FACT_FIELDS = (
     "industry",
     "measurement_objective",
