@@ -1040,3 +1040,96 @@ No live model benchmark or expert scientific acceptance claimed. Added prompt
 instructions consume context; evidence retention and semantic-quality improvement
 remain unmeasured. Existing scientific gates and pending PLAN tasks remain open.
 No schema, provider logic, retrieval default, architecture or challenge facts changed.
+
+## Completed — Step 1 budgeting and extraction repair — 2026-10-18
+
+User-approved implementation plan. Sol reviewed Luna implementation; final verification used repository-local uv/cache/temp paths and Python 3.14.4. Full pytest needed approved execution outside the sandbox because Windows asyncio socketpair creation blocks inside it. Tests used no credentials or provider network. Local Ollama replay was separately authorized and used no paid provider.
+
+### Completed milestone 1 — 2026-10-18
+
+**Exact original task text:**
+
+```markdown
+## 1. Reproduce failures and expose budget consumption
+
+- Add offline regressions for one 1,200-byte excerpt without parent context, eight realistically sized excerpts, attached qualifications, and customer text containing laboratory checks, first pilot, and pre-production commitment.
+- Add a default-empty `request_budget_diagnostics` collection to reports. Each entry records stage, attempt, provider/model, estimator version, context/output limits, margin, component bytes and estimated tokens, selected/retained/dropped evidence IDs, fit decision, and nullable provider-reported token usage.
+- Record diagnostics before fitting, after fitting, and for actual requests—including retries and follow-up requests. Keep entries available when no request is sent.
+- Export diagnostics in JSON and Markdown; use existing diagnostics UI. Preserve `retrieved_evidence` semantics as evidence admitted to assessment; retain original selection IDs separately.
+- Distinguish “estimated budget exceeded” from provider-confirmed exhaustion. Never invent actual token counts.
+
+**Acceptance:** empty evidence becomes explainable through component measurements; old reports still load.
+```
+
+**Implementation:** Typed, default-empty report budget diagnostics now retain preflight/fitting/request/retry/follow-up decisions, estimates, selected/retained/dropped evidence IDs and nullable actual usage. Session isolation and technical Markdown/JSON exports are covered, including no-dispatch abstention and historical-report loading. Added a separate diagnostics Markdown download without changing the customer report layout.
+
+**Verification:** Offline regressions cover the 1,200-byte case, eight realistic bundles dispatched to a mocked evidence assessor, intact qualifications, all-drop diagnostics, schema enum shrinkage, exports and old JSON.
+
+### Completed milestone 2 — 2026-10-18
+
+**Exact original task text:**
+
+```markdown
+## 2. Replace mixed-unit accounting
+
+- Implement one shared budgeting helper in `providers.py`; use it for extraction, query generation, evidence assessment, synthesis, and their retries.
+- Initial estimate: `ceil(serialized UTF-8 bytes / 3)` per component. Charge serialized messages and supplied response schema once each; include schema text separately when actually embedded in a prompt.
+- Reserve configured output tokens plus safety margin `max(512, ceil(0.15 × estimated input tokens))`. Keep byte measurements separate from token estimates.
+- Rebuild evidence-dependent schemas after every dropped bundle. Fit highest-ranked complete bundles first; remove only whole lower-ranked bundles. Preserve attached limitations, tables, locations, and quotations.
+- Check final synthesis against its actual assessed-evidence payload. If it exceeds estimated budget, abstain while preserving evidence assessment and diagnostics.
+- Reject impossible output-reserve configurations explicitly. Preserve existing retry limits and provider-error behavior; do not add fallback assessors, automatic context increases, or silent truncation.
+- Compare estimates with actual prompt counts from local Ollama requests. If measured counts exceed estimates, increase the estimator coefficient to cover the largest measured tokens/byte ratio plus 15%, rerun checks, and version the revised estimator. Do not lower the initial coefficient.
+
+**Acceptance:** realistic default-budget fixture retains evidence and reaches mocked evidence assessment; genuine oversized requests remain bounded. Live results describe estimates as estimates.
+```
+
+**Implementation:** All requested LLM stages share ceil(UTF-8 bytes / 3) estimation, configured output reserve and max(512, ceil(15% input)) margin. Whole bundles are dropped from the ranked suffix; schemas are rebuilt. Impossible reserves fail explicitly; synthesis overflow retains the assessment. Embedding usage cannot overwrite chat diagnostics. Local measured counts stayed below estimates, so the coefficient was not changed.
+
+**Verification:** Boundary and Unicode tests, per-attempt retry diagnostics, distinct follow-up stages, chat/embedding usage attribution, synthesis-overflow preservation, and local D01 evidence flow passed.
+
+### Completed milestone 3 — 2026-10-18
+
+**Exact original task text:**
+
+```markdown
+## 3. Repair extraction and inference provenance
+
+- Clarify extraction prompt with examples for laboratory reference checks, pilot deployment, desired decision stage, negation, and conditional intent. Preserve customer wording and units.
+- Test raw model output and cleaned output independently. Record whether a field was omitted by the model or removed by validation; retain existing session-local request tracing without introducing persistent customer-text logs.
+- Keep exact quotes in `field_quotes`. Label retained nonliteral paraphrases as **quote-backed interpretation**, rather than literal customer quotations. This label does not establish semantic correctness.
+- Add a default-empty `inferred_customer_context` collection to customer models. Entries contain field, inferred value, exact supporting quote, and rationale; initially support industry inference only.
+- Keep inferred `pharmaceutical` outside authoritative `industry` when unstated. Show it as **unverified inference** in UI and exports. Exclude inferred context from required-field gates, retrieval queries, and scientific customer-condition comparisons.
+- Require supporting quotes to occur verbatim in customer text. Missing or invalid support produces a warning and removes the inferred entry. Do not add keyword-based recovery or broaden existing numeric guards.
+- Preserve loading of historical reports and their recorded provenance; apply new labels to new extractions.
+
+**Acceptance:** explicit laboratory/pilot/stage values survive validation; unsupported inference cannot become customer fact. Live omission repair remains unaccepted until demonstrated on replay.
+```
+
+**Implementation:** Extraction prompt now distinguishes reference laboratory checks, first-pilot deployment and pre-production commitment. Exact-case quotations and quote-backed interpretations have different provenance. Industry inference is retained separately, requires a literal supporting quote, and is excluded from authoritative industry, retrieval and condition comparisons. Explicit industry labels have no finite sector allowlist. Historical provenance is preserved. Independent D01 replay retained all three target fields; an unrelated invalid process quote remained visibly rejected.
+
+**Verification:** Raw and cleaned D01 target fields agreed in a 20.135-second local extraction replay: Laboratory checks; first pilot; before we commit to production equipment. Authoritative industry stayed null; pharmaceutical remained unverified inference. No further semantic tuning was performed.
+
+### Completed milestone 4 — 2026-10-18
+
+**Exact original task text:**
+
+```markdown
+## 4. Verification and delivery
+
+- Cover exact fit boundaries, Unicode, changing schema enums, repeated context, retries, oversized fixed overhead, synthesis overflow, and abstention exports.
+- Add extraction paraphrase, negation, missing-quote, inferred-industry, and historical-report compatibility tests. Preserve four synthetic examples, Markdown exports, and Streamlit AppTest coverage.
+- Run credential-free tests, then a local Ollama replay using original customer text when available and a pinned index. Compare selected/retained IDs, S01 `0040`/`0042` when retrieved, stage completion, actual token usage, and latency. Require no particular candidate count.
+- Run `uv run pytest`, `uv run ruff check .`, and `uv run ruff format --check .`; use repository-local uv cache if required. Report unavailable checks accurately.
+- Sol delegates sequential, bounded implementation milestones to Luna, reviews results, and commits accepted changes. Preserve unrelated working-tree edits. After acceptance, copy exact milestone text and verification into `HISTORY.md` before removing pending text.
+- Update setup/architecture and hackathon documentation where affected. Keep scientific acceptance gates open; apply repository’s two-attempt blocker rule.
+```
+
+**Implementation:** Sol delegated implementation and focused repairs to Luna, reviewed source and acceptance tests, ran final full integration checks, and documented calibrated local replay limits. No dependencies, retrieval defaults, scientific guards or Step 2 logic changed. Existing user edits remain outside this commit. The approved plan is archived here; pending scientific and historical-comparison gates remain in the backlog.
+
+**Verification:** Final uv pytest: 290 passed in 10.71s, including Streamlit AppTests and four synthetic examples. uv Ruff check passed; uv Ruff format --check passed (80 files). Streamlit smoke returned 200/ok and stopped its server. git diff --check passed.
+
+### Deviations and remaining risks
+
+The referenced attachments were unavailable, but the matching D01 enquiry was recovered from the repository reference document. The completed full replay retained seven verified technical excerpts with zero budget drops and recorded evidence assessment; it still abstained because observation/citation/method guards rejected support. S01 0040 survived; 0042 occurred among query candidates but was not in the final pooled selection. Full replay took 94.714 seconds. An initial query import-shadowing error was fixed; an initial UI assertion used a nonexistent Streamlit download data field and was corrected before final acceptance.
+
+Budget and extraction were verified in separate live runs; full scientific pipeline was not rerun after the focused extraction repair. Synthesis was not reached in the full replay, so its budget is verified offline, not calibrated live. Actual prompt counts were below initial estimates; reported provider counts may reflect caching/accounting and do not justify downward calibration. No exact historical-run recreation or scientific acceptance is claimed. Existing semantic acceptance blockers and Step 2 remain pending. Detailed index/model/usage measurements: docs/STEP1_REPAIR_VERIFICATION.md.

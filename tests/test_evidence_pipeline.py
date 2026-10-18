@@ -18,7 +18,7 @@ from spectro_ai.models import (
     SourceLocation,
     TechniqueCandidate,
 )
-from spectro_ai.providers import assess_use_case
+from spectro_ai.providers import ProviderError, assess_use_case
 
 
 class Retriever:
@@ -254,6 +254,31 @@ def test_s02_hot_polymer_ft_ir_alone_cannot_promote_d01_powder_experiment(monkey
         report.evidence_assessment.observations[0].condition_comparisons[1].comparison
         == "different"
     )
+
+
+def test_synthesis_budget_abstains_while_preserving_assessed_evidence(monkeypatch):
+    monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
+    source = _evidence("FTIR measured API in hot polymer during extrusion.")
+
+    class OverflowSynthesis:
+        def fit_evidence(self, use_case, retrieved):
+            return retrieved, []
+
+        def assess(self, *args, **kwargs):
+            raise ProviderError("Estimated assessment synthesis exceeds configured context budget")
+
+    report = assess_use_case(
+        _case(),
+        retriever=Retriever(source),
+        assessor=OverflowSynthesis(),
+        evidence_assessor=lambda *_args, **_kwargs: _assessment(
+            source, basis="reasoned_exploratory", matrix_comparison="different", exploratory=True
+        ),
+    )
+    assert report.candidate_techniques == []
+    assert report.evidence_assessment is not None
+    assert report.retrieved_evidence == [source]
+    assert "Estimated synthesis context budget exceeded" in report.recommendation_rationale
 
 
 def test_lexical_overlap_cannot_override_application_supported_label(monkeypatch):

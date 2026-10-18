@@ -11,11 +11,13 @@ from spectro_ai.models import (
     EvidenceClaim,
     EvidenceContextBlock,
     FeasibilityPlan,
+    RequestBudgetDiagnostic,
     RetrievedEvidence,
     SourceLocation,
     TechniqueCandidate,
     ValidationDiagnostic,
 )
+from spectro_ai.reporting import render_markdown
 from spectro_ai.request_trace import record_query, record_request
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
@@ -91,7 +93,7 @@ def test_four_synthetic_examples_use_injected_assessment(scenarios, monkeypatch)
         ]
         assert app.json
         assert app.session_state["report"].candidate_techniques == []
-        assert len(app.get("download_button")) == 2
+        assert len(app.get("download_button")) == 3
     assert requests == [scenario["problem"] for scenario in scenarios]
 
 
@@ -103,7 +105,11 @@ def test_blank_input_and_stale_report_behavior(monkeypatch: pytest.MonkeyPatch) 
     app.text_area[0].input("We measure moisture in flour.").run()
     app.button[1].click().run()
     assert app.json
-    assert len(app.get("download_button")) == 2
+    assert len(app.get("download_button")) == 3
+    assert any(
+        button.label == "Download technical diagnostics as Markdown"
+        for button in app.get("download_button")
+    )
     app.text_area[0].input("Changed problem.").run()
     assert not app.json
     assert not app.get("download_button")
@@ -162,7 +168,7 @@ def test_reranker_configuration_change_invalidates_cached_report(monkeypatch):
     app = AppTest.from_file(str(APP)).run()
     app.text_area[0].input("We measure moisture in flour.").run()
     app.button[1].click().run()
-    assert len(app.get("download_button")) == 2
+    assert len(app.get("download_button")) == 3
     monkeypatch.setenv("SPECTRO_RAG_RERANKER", "cross_encoder")
     app.run()
     assert not app.get("download_button")
@@ -176,7 +182,7 @@ def test_multi_query_setting_invalidates_cached_report(monkeypatch):
     assert any("Experimental multi-query retrieval: disabled" in item.value for item in app.caption)
     app.text_area[0].input("We measure moisture in flour.").run()
     app.button[1].click().run()
-    assert len(app.get("download_button")) == 2
+    assert len(app.get("download_button")) == 3
     monkeypatch.setenv("SPECTRO_RAG_MULTI_QUERY", "true")
     app.run()
     assert not app.get("download_button")
@@ -326,6 +332,17 @@ def test_failed_expert_correction_preserves_error(monkeypatch: pytest.MonkeyPatc
 
 def test_json_export_and_diagnostics_are_rendered(monkeypatch: pytest.MonkeyPatch) -> None:
     report = _abstention("We measure moisture in flour.")
+    report.request_budget_diagnostics = [
+        RequestBudgetDiagnostic(
+            stage="evidence assessment before fitting",
+            context_limit=16384,
+            output_reserve=4096,
+            safety_margin=512,
+            component_bytes={"messages": 1200},
+            component_estimated_tokens={"messages": 400},
+            fit_decision="fits",
+        )
+    ]
     report.candidate_techniques = [
         TechniqueCandidate(
             spectroscopy_method="NIR",
@@ -351,7 +368,16 @@ def test_json_export_and_diagnostics_are_rendered(monkeypatch: pytest.MonkeyPatc
     app.text_area[0].input("We measure moisture in flour.").run()
     app.button[1].click().run()
     assert not app.exception
-    assert len(app.get("download_button")) == 2
+    assert len(app.get("download_button")) == 3
+    diagnostics_download = next(
+        button
+        for button in app.get("download_button")
+        if button.label == "Download technical diagnostics as Markdown"
+    )
+    assert diagnostics_download.proto.url
+    diagnostics_markdown = render_markdown(report, include_diagnostics=True)
+    assert "utf8-bytes-div3-v1" in diagnostics_markdown
+    assert "messages 1200 bytes / 400 estimated tokens" in diagnostics_markdown
     assert [tab.label for tab in app.tabs] == [
         "Assessment",
         "Technical diagnostics",

@@ -1,5 +1,11 @@
 # Grounded LLM pipeline — pending acceptance
 
+## Step 1 reliability repair — user-approved 2026-10-18
+
+Software repair completed: [budgeting and extraction repair](PLAN_STEP1_REPAIR.md).
+Exact accepted milestones and verification are in HISTORY.md. Preserve all scientific
+acceptance gates below; Step 2 and exact historical-run comparison remain pending.
+
 ## Multi-query retrieval — disabled-by-default experiment
 
 User-approved 2026-10-18. Preserve existing grouped retrieval, provider policy,

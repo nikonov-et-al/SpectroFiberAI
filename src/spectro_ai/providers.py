@@ -4,8 +4,9 @@ import json
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
+from math import ceil
 from pathlib import Path
 from threading import Lock
 from typing import Literal, Protocol
@@ -38,14 +39,76 @@ from spectro_ai.models import (
     EvidenceQuestion,
     FeasibilityPlan,
     QueryDiagnostics,
+    RequestBudgetDiagnostic,
     RetrievalDiagnostic,
     RetrievedEvidence,
     TechniqueCandidate,
     ValidationDiagnostic,
 )
-from spectro_ai.request_trace import record_request, request_stage
+from spectro_ai.request_trace import (
+    capture_budget_diagnostics,
+    current_budget_diagnostics,
+    current_request_stage,
+    record_budget_diagnostic,
+    record_provider_usage,
+    record_request,
+    request_stage,
+)
 
 _OLLAMA_LOCK = Lock()
+_BUDGET_ESTIMATOR_VERSION = "utf8-bytes-div3-v1"
+
+
+# ponytail: byte ratio is approximate; use calibrated model tokenization if local estimates fail.
+def _estimate_tokens(value: object) -> tuple[int, int]:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    size = len(encoded)
+    return size, ceil(size / 3)
+
+
+def _budget_diagnostic(
+    stage: str,
+    messages: list[dict],
+    schema: dict | None,
+    settings: ExtractionSettings,
+    *,
+    selected: list[RetrievedEvidence] | None = None,
+    retained: list[RetrievedEvidence] | None = None,
+    dropped: list[str] | None = None,
+    attempt: int = 1,
+) -> tuple[dict, bool]:
+    components = {"messages": messages}
+    if schema is not None:
+        components["response_schema"] = schema
+    sizes = {name: _estimate_tokens(value) for name, value in components.items()}
+    byte_counts = {name: item[0] for name, item in sizes.items()}
+    token_counts = {name: item[1] for name, item in sizes.items()}
+    input_tokens = sum(token_counts.values())
+    margin = max(512, ceil(input_tokens * 0.15))
+    output = settings.output_tokens
+    if output + 512 >= settings.context:
+        raise ProviderError("Configured output reserve exceeds the available context budget")
+    fits = input_tokens + output + margin <= settings.context
+    diagnostic = {
+        "stage": stage,
+        "attempt": attempt,
+        "provider": settings.provider,
+        "model": settings.model,
+        "estimator_version": _BUDGET_ESTIMATOR_VERSION,
+        "context_limit": settings.context,
+        "output_reserve": output,
+        "safety_margin": margin,
+        "component_bytes": byte_counts,
+        "component_estimated_tokens": token_counts,
+        "selected_evidence_ids": [item.evidence_id for item in selected or []],
+        "retained_evidence_ids": [
+            item.evidence_id for item in (retained if retained is not None else selected or [])
+        ],
+        "dropped_evidence_ids": list(dropped or []),
+        "fit_decision": "fits" if fits else "estimated budget exceeded",
+    }
+    record_budget_diagnostic(diagnostic)
+    return diagnostic, fits
 
 
 class ProviderError(ValueError):
@@ -321,6 +384,8 @@ def ollama_request(
                 result = json.load(response)
         finally:
             _OLLAMA_LOCK.release()
+        if isinstance(result, dict) and route == "/api/chat":
+            record_provider_usage(result.get("prompt_eval_count"), result.get("eval_count"))
         if deadline is not None and monotonic() >= deadline:
             raise RetrievalDeadlineExceeded("Ollama request exceeded retrieval deadline")
         if not isinstance(result, dict) or result.get("error"):
@@ -400,6 +465,20 @@ def _extraction_schema() -> dict:
                     },
                 },
                 "additionalProperties": False,
+            },
+            "inferred_customer_context": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "field": {"type": "string", "enum": ["industry"]},
+                        "value": {"type": "string"},
+                        "supporting_quote": {"type": "string"},
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["field", "value", "supporting_quote", "rationale"],
+                    "additionalProperties": False,
+                },
             },
         }
     )
@@ -523,13 +602,17 @@ def generate_evidence_query_plan(
         },
         {"role": "user", "content": json.dumps(request_data, ensure_ascii=False)},
     ]
-    if len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 1024 > settings.context:
-        raise ProviderError("Retrieval query input exceeds configured assessment context budget")
+    _, query_fits = _budget_diagnostic(
+        "retrieval query generation",
+        messages,
+        query_schema,
+        replace(settings, output_tokens=768),
+    )
+    if not query_fits:
+        raise ProviderError("Estimated retrieval query input exceeds configured context budget")
     if usage is not None:
         usage["call_count"] = 1
     if settings.provider == "openai":
-        from dataclasses import replace
-
         with request_stage("retrieval query generation"):
             content = _openai_json(
                 replace(settings, timeout=timeout, output_tokens=768),
@@ -594,6 +677,7 @@ def _clean_extraction(
     values["source_text"] = customer_text or None
     warnings: list[str] = []
     valid_quotes: dict[str, str] = {}
+    inferred: list[dict[str, str]] = []
     values["request_id"] = "req_" + sha256(customer_text.encode("utf-8")).hexdigest()[:16]
 
     def supported(value: str, quote: str | None) -> bool:
@@ -604,6 +688,15 @@ def _clean_extraction(
         return True
 
     def field_semantics_supported(field: str, value: str) -> bool:
+        if field == "industry":
+            quote = parsed.field_quotes.get(field) or ""
+            value_pattern = re.escape(value)
+            labeled = rf"(?im)^\s*industry\s*:\s*{value_pattern}\s*$"
+            self_described = (
+                rf"\b(?:we are|we're|our company is)\s+(?:an?\s+)?{value_pattern}\b"
+                rf"|\b{value_pattern}\s+(?:company|manufacturer|business|industry)\b"
+            )
+            return bool(re.search(labeled, customer_text) or re.search(self_described, quote, re.I))
         if field == "physical_state":
             states = (
                 r"\b(solid|liquid|gas|powder|slurry|paste|gel|granular|pellet|suspension|melt)\b"
@@ -619,7 +712,38 @@ def _clean_extraction(
             values[field] = value
             continue
         quote = parsed.field_quotes.get(field)
+        if (
+            field == "industry"
+            and value
+            and supported(value, quote)
+            and not field_semantics_supported(field, value)
+        ):
+            inferred.append(
+                {
+                    "field": "industry",
+                    "value": value,
+                    "supporting_quote": quote,
+                    "rationale": (
+                        "Sector inferred from customer wording; company industry is unstated."
+                    ),
+                }
+            )
+            values[field] = None
+            continue
         if supported(value, quote) and field_semantics_supported(field, value):
+            if field == "industry" and value.casefold() not in quote.casefold():
+                inferred.append(
+                    {
+                        "field": "industry",
+                        "value": value,
+                        "supporting_quote": quote,
+                        "rationale": (
+                            "Industry label inferred from quoted product or process wording."
+                        ),
+                    }
+                )
+                values[field] = None
+                continue
             valid_quotes[field] = quote
             continue
         values[field] = [] if isinstance(value, list) else None
@@ -627,6 +751,21 @@ def _clean_extraction(
             f"Ignored {field}: supporting quote was missing, nonliteral, "
             "omitted a stated number, or did not support the field meaning."
         )
+
+    for item in parsed.inferred_customer_context:
+        quote = item.supporting_quote
+        if item.field == "industry" and quote and quote in customer_text:
+            if not any(
+                existing["field"] == item.field
+                and existing["value"] == item.value
+                and existing["supporting_quote"] == quote
+                for existing in inferred
+            ):
+                inferred.append(item.model_dump())
+        else:
+            warnings.append(
+                "Ignored inferred industry: supporting quote was missing or not literal."
+            )
 
     for field in ("customer_preferences", "strict_requirements"):
         supported_items = []
@@ -650,12 +789,31 @@ def _clean_extraction(
                 warnings.append(f"Ignored unsupported {group[:-1]} statement.")
         values[group] = supported_items
 
-    values["field_quotes"] = valid_quotes
-    values["field_provenance"] = {
-        field: "customer quote"
-        for field in (*CUSTOMER_FACT_FIELDS, "customer_preferences", "strict_requirements")
-        if field in valid_quotes or any(key.startswith(f"{field}_") for key in valid_quotes)
+    targeted_cues = {
+        "reference_measurement": r"\b(lab(?:oratory)? checks?|reference measurements?)\b",
+        "deployment_mode": r"\b(first pilot|pilot)\b",
+        "desired_stage": r"\b(before|prior to)\b.{0,80}\b(production equipment|production line)\b",
     }
+    for field, cue in targeted_cues.items():
+        if getattr(parsed, field) is None and re.search(cue, customer_text, re.I):
+            warnings.append(
+                f"Extraction omitted {field}: relevant wording appears in customer text."
+            )
+
+    values["field_quotes"] = valid_quotes
+    values["inferred_customer_context"] = inferred
+    values["field_provenance"] = {}
+    for field in (*CUSTOMER_FACT_FIELDS, "customer_preferences", "strict_requirements"):
+        quote = valid_quotes.get(field)
+        if quote:
+            value = getattr(parsed, field)
+            values["field_provenance"][field] = (
+                "customer quote"
+                if isinstance(value, str) and value in quote
+                else "quote-backed interpretation"
+            )
+        elif any(key.startswith(f"{field}_") for key in valid_quotes):
+            values["field_provenance"][field] = "quote-backed interpretation"
     values["unknown_or_missing_information"] = []
     values["extraction_mode"] = provider
     values["extraction_warnings"] = warnings
@@ -707,6 +865,10 @@ def _openai_json(
                 usage["prompt_tokens"] = response_usage.prompt_tokens
                 usage["completion_tokens"] = response_usage.completion_tokens
                 usage["call_count"] = 1
+            if response_usage is not None:
+                record_provider_usage(
+                    response_usage.prompt_tokens, response_usage.completion_tokens
+                )
     except Exception:
         raise ProviderError(
             "OpenAI request failed. Check endpoint, model, credentials, timeout, "
@@ -730,22 +892,23 @@ class OllamaUseCaseExtractor:
         if self.settings.provider == "openai":
             return OpenAIUseCaseExtractor(self.settings).extract(customer_text)
         system = _extraction_prompt()
-        reserved_context = self.settings.output_tokens + 256
-        if len((system + customer_text).encode("utf-8")) + reserved_context > self.settings.context:
-            raise ProviderError(
-                "Extraction input exceeds the configured context budget. Increase "
-                "SPECTRO_AI_CONTEXT or shorten the complete customer text."
-            )
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": customer_text},
         ]
+        schema = _extraction_schema()
+        _, fits = _budget_diagnostic("extraction preflight", messages, schema, self.settings)
+        if not fits:
+            raise ProviderError(
+                "Estimated extraction input exceeds the configured context budget. Increase "
+                "SPECTRO_AI_CONTEXT or shorten the complete customer text."
+            )
         payload = {
             "model": self.settings.model,
             "messages": messages,
             "stream": False,
             "think": False,
-            "format": _extraction_schema(),
+            "format": schema,
             "options": {
                 "num_ctx": self.settings.context,
                 "num_predict": self.settings.output_tokens,
@@ -753,6 +916,14 @@ class OllamaUseCaseExtractor:
             },
         }
         for attempt in range(2):
+            _, fits = _budget_diagnostic(
+                "extraction", messages, schema, self.settings, attempt=attempt + 1
+            )
+            if not fits:
+                raise ProviderError(
+                    "Estimated extraction retry exceeds the configured context budget. "
+                    "Increase SPECTRO_AI_CONTEXT or shorten the complete customer text."
+                )
             with request_stage("extraction", attempt + 1):
                 result = ollama_request(
                     self.settings,
@@ -792,15 +963,13 @@ class OpenAIUseCaseExtractor:
             {"role": "user", "content": customer_text},
         ]
         for attempt in range(2):
-            if (
-                len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-                + settings.output_tokens
-                + 256
-                > settings.context
-            ):
+            _, fits = _budget_diagnostic(
+                "extraction", messages, _extraction_schema(), settings, attempt=attempt + 1
+            )
+            if not fits:
                 kind = "retry" if attempt else "input"
                 raise ProviderError(
-                    f"Extraction {kind} exceeds the configured context budget. "
+                    f"Estimated extraction {kind} exceeds the configured context budget. "
                     "Increase SPECTRO_AI_CONTEXT or shorten the complete customer text."
                 )
             with request_stage("extraction", attempt + 1):
@@ -1079,19 +1248,40 @@ class OllamaEvidenceAssessor:
         """Fit complete evidence bundles; keep each excerpt with all attached context."""
         retained = list(evidence)
         dropped: list[str] = []
-        schema_bytes = len(
-            json.dumps(self._schema(evidence), separators=(",", ":")).encode("utf-8")
+        initial_schema = self._schema(retained)
+        _budget_diagnostic(
+            "evidence assessment before fitting",
+            self._messages(use_case, retained),
+            initial_schema,
+            self.settings,
+            selected=evidence,
+            retained=retained,
         )
         while retained:
+            schema = self._schema(retained)
             messages = self._messages(use_case, retained)
-            request_bytes = (
-                len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-                + schema_bytes
+            _, fits = _budget_diagnostic(
+                "evidence assessment fitting",
+                messages,
+                schema,
+                self.settings,
+                selected=evidence,
+                retained=retained,
+                dropped=dropped,
             )
-            if request_bytes + self.settings.output_tokens + 256 <= self.settings.context:
-                return retained, dropped
-            dropped.append(retained.pop().evidence_id)
-        return [], dropped
+            if fits:
+                break
+            dropped.insert(0, retained.pop().evidence_id)
+        _budget_diagnostic(
+            "evidence assessment after fitting",
+            self._messages(use_case, retained),
+            self._schema(retained),
+            self.settings,
+            selected=evidence,
+            retained=retained,
+            dropped=dropped,
+        )
+        return retained, dropped
 
     def __call__(
         self,
@@ -1104,11 +1294,13 @@ class OllamaEvidenceAssessor:
 
         messages = self._messages(use_case, evidence)
         schema = self._schema(evidence)
-        serialized_bytes = len(
-            json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ) + len(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
-        if serialized_bytes + self.settings.output_tokens + 256 > self.settings.context:
-            raise ProviderError("Evidence assessment exceeds configured context budget")
+        stage, stage_attempt = current_request_stage()
+        diagnostic, fits = _budget_diagnostic(
+            stage, messages, schema, self.settings, selected=evidence, attempt=stage_attempt
+        )
+        serialized_bytes = sum(diagnostic["component_bytes"].values())
+        if not fits:
+            raise ProviderError("Estimated evidence assessment exceeds configured context budget")
         payload = {
             "model": self.settings.model,
             "messages": messages,
@@ -1134,14 +1326,17 @@ class OllamaEvidenceAssessor:
                         },
                     ]
                     payload["messages"] = messages
-                    request_bytes = len(
-                        json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode(
-                            "utf-8"
-                        )
-                    ) + len(json.dumps(schema, separators=(",", ":")).encode("utf-8"))
-                    if request_bytes + self.settings.output_tokens + 256 > self.settings.context:
+                    _, retry_fits = _budget_diagnostic(
+                        stage,
+                        messages,
+                        schema,
+                        self.settings,
+                        selected=evidence,
+                        attempt=stage_attempt + attempt,
+                    )
+                    if not retry_fits:
                         raise ProviderError(
-                            "Evidence assessment structural retry exceeds context budget"
+                            "Estimated evidence assessment structural retry exceeds context budget"
                         )
                 if self.settings.provider == "openai":
                     usage = {}
@@ -1210,16 +1405,37 @@ class OllamaTechnicalAssessor:
         """Fit complete excerpt/context bundles, preserving attached qualifications."""
         retained = list(evidence)
         dropped: list[str] = []
+        _budget_diagnostic(
+            "assessment synthesis before fitting",
+            self._messages(use_case, retained),
+            _technical_schema(),
+            self.settings,
+            selected=evidence,
+            retained=retained,
+        )
         while retained:
-            messages = self._messages(use_case, retained)
-            if (
-                len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-                + (self.settings.output_tokens + 256)
-                <= self.settings.context
-            ):
-                return retained, dropped
-            dropped.append(retained.pop().evidence_id)
-        return [], dropped
+            _, fits = _budget_diagnostic(
+                "assessment synthesis fitting",
+                self._messages(use_case, retained),
+                _technical_schema(),
+                self.settings,
+                selected=evidence,
+                retained=retained,
+                dropped=dropped,
+            )
+            if fits:
+                break
+            dropped.insert(0, retained.pop().evidence_id)
+        _budget_diagnostic(
+            "assessment synthesis after fitting",
+            self._messages(use_case, retained),
+            _technical_schema(),
+            self.settings,
+            selected=evidence,
+            retained=retained,
+            dropped=dropped,
+        )
+        return retained, dropped
 
     @staticmethod
     def _messages(
@@ -1308,13 +1524,18 @@ class OllamaTechnicalAssessor:
         evidence_assessment: EvidenceAssessment,
     ) -> AssessmentReport:
         messages = self._messages(use_case, evidence, evidence_assessment=evidence_assessment)
-        request_bytes = len(
-            json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        stage, stage_attempt = current_request_stage()
+        diagnostic, fits = _budget_diagnostic(
+            stage,
+            messages,
+            _technical_schema(),
+            self.settings,
+            selected=evidence,
+            attempt=stage_attempt,
         )
-        schema_bytes = len(json.dumps(_technical_schema(), separators=(",", ":")).encode("utf-8"))
-        if request_bytes + schema_bytes + self.settings.output_tokens + 256 > self.settings.context:
+        if not fits:
             raise ProviderError(
-                "Assessment synthesis input exceeds configured context budget; "
+                "Estimated assessment synthesis input exceeds configured context budget; "
                 "preserve qualifications by reducing complete evidence bundles."
             )
         payload = {
@@ -1339,13 +1560,18 @@ class OllamaTechnicalAssessor:
                     },
                 ]
                 payload["messages"] = messages
-                if (
-                    len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-                    + (self.settings.output_tokens + 256)
-                    > self.settings.context
-                ):
+                _, retry_fits = _budget_diagnostic(
+                    stage,
+                    messages,
+                    _technical_schema(),
+                    self.settings,
+                    selected=evidence,
+                    attempt=stage_attempt + attempt,
+                )
+                if not retry_fits:
                     raise ProviderError(
-                        "Assessment retry exceeds the configured context budget. Increase "
+                        "Estimated assessment retry exceeds configured context budget. "
+                        "Increase "
                         "SPECTRO_AI_CONTEXT or reduce retrieved evidence."
                     )
             if self.settings.provider == "openai":
@@ -1609,6 +1835,9 @@ def _abstention_report(
         RetrievalDiagnostic.model_validate(item) for item in (retrieval_diagnostics or [])
     ]
     report.query_diagnostics = query_diagnostics
+    report.request_budget_diagnostics = [
+        RequestBudgetDiagnostic.model_validate(item) for item in current_budget_diagnostics()
+    ]
     return report
 
 
@@ -1735,7 +1964,7 @@ def _apply_feasibility_safeguards(
     return safe, warnings
 
 
-def assess_use_case(
+def _assess_use_case(
     use_case: CustomerUseCase,
     *,
     assessor: TechnicalAssessor | None = None,
@@ -1908,8 +2137,8 @@ def assess_use_case(
             retrieval_diagnostics = getattr(source, "retrieval_diagnostics", [])
             report = _abstention_report(
                 use_case,
-                "No retrieved excerpt fits the complete request within the configured "
-                "context budget; assessment abstained.",
+                "Estimated context budget exceeded for every complete evidence bundle; "
+                "assessment abstained before a provider request.",
                 status="insufficient_information",
                 method="evidence_abstention",
                 provider=provider,
@@ -1984,7 +2213,8 @@ def assess_use_case(
                 raise
             report = _abstention_report(
                 use_case,
-                "Assessed evidence and qualifications exceed synthesis context; "
+                "Estimated synthesis context budget exceeded with assessed evidence "
+                "and qualifications; "
                 "no recommendation generated.",
                 status="insufficient_information",
                 provider=provider,
@@ -2376,9 +2606,35 @@ def assess_use_case(
             ],
             query_diagnostics=query_diagnostics,
             evidence_assessment=evidence_assessment,
+            request_budget_diagnostics=[
+                RequestBudgetDiagnostic.model_validate(item)
+                for item in current_budget_diagnostics()
+            ],
         )
     except (ProviderError, ValueError) as exc:
         raise ProviderError(f"Grounded assessment failed: {exc}") from None
+
+
+def assess_use_case(
+    use_case: CustomerUseCase,
+    *,
+    assessor: TechnicalAssessor | None = None,
+    evidence_assessor: EvidenceAssessor | None = None,
+    retriever: EvidenceRetriever | None = None,
+    query_generator: Callable[[CustomerUseCase], EvidenceQueryPlan] | None = None,
+) -> AssessmentReport:
+    with capture_budget_diagnostics() as diagnostics:
+        report = _assess_use_case(
+            use_case,
+            assessor=assessor,
+            evidence_assessor=evidence_assessor,
+            retriever=retriever,
+            query_generator=query_generator,
+        )
+    report.request_budget_diagnostics = [
+        RequestBudgetDiagnostic.model_validate(item) for item in diagnostics
+    ]
+    return report
 
 
 def assess_problem(
@@ -2392,9 +2648,14 @@ def assess_problem(
         raise ProviderError("The baseline provider was removed. Use ollama or openai.")
     if provider not in {"ollama", "openai"}:
         raise ProviderError(f"Unsupported provider {provider!r}. Use ollama or openai.")
-    with request_stage("extraction"):
-        use_case = (extractor or OllamaUseCaseExtractor()).extract(text)
-    return assess_use_case(use_case, retriever=retriever)
+    with capture_budget_diagnostics() as diagnostics:
+        with request_stage("extraction"):
+            use_case = (extractor or OllamaUseCaseExtractor()).extract(text)
+        report = _assess_use_case(use_case, retriever=retriever)
+    report.request_budget_diagnostics = [
+        RequestBudgetDiagnostic.model_validate(item) for item in diagnostics
+    ]
+    return report
 
 
 if __name__ == "__main__":

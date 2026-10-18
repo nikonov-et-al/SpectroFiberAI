@@ -1,15 +1,29 @@
 import json
+from math import ceil
 
 import pytest
 
 from spectro_ai.models import (
     CustomerUseCase,
+    EvidenceAssessment,
     EvidenceContextBlock,
     RetrievedEvidence,
     SourceLocation,
 )
-from spectro_ai.providers import ExtractionSettings, OllamaEvidenceAssessor, ProviderError
-from spectro_ai.request_trace import RequestTrace, capture_requests
+from spectro_ai.providers import (
+    ExtractionSettings,
+    OllamaEvidenceAssessor,
+    OllamaTechnicalAssessor,
+    ProviderError,
+    _budget_diagnostic,
+    _estimate_tokens,
+)
+from spectro_ai.request_trace import (
+    RequestTrace,
+    capture_budget_diagnostics,
+    capture_requests,
+    request_stage,
+)
 
 
 def _case() -> CustomerUseCase:
@@ -91,12 +105,136 @@ def test_provider_schema_restricts_references_to_supplied_ids_and_fields() -> No
     assert "sample_matrix" in defs["CustomerFactField"]["enum"]
 
 
+def test_inferred_industry_is_excluded_from_assessment_customer_facts() -> None:
+    case = _case().model_copy(
+        update={
+            "industry": None,
+            "inferred_customer_context": [
+                {
+                    "field": "industry",
+                    "value": "pharmaceutical",
+                    "supporting_quote": "active pharmaceutical ingredient",
+                    "rationale": "Unverified inference.",
+                }
+            ],
+        }
+    )
+    evidence = _evidence()
+    evidence_messages = OllamaEvidenceAssessor._messages(case, [evidence])
+    technical_messages = OllamaTechnicalAssessor._messages(
+        case,
+        [evidence],
+        evidence_assessment=EvidenceAssessment(input_fingerprint="f", assessor_version="v"),
+    )
+    for messages in (evidence_messages, technical_messages):
+        payload = json.loads(messages[1]["content"])
+        customer = payload.get("customer", payload.get("customer_case_untrusted_data", {}))
+        facts = customer.get("validated_customer_facts", {})
+        assert "industry" not in facts
+        assert "inferred_customer_context" not in customer
+
+
 def test_fit_evidence_drops_whole_bundles_without_stripping_context() -> None:
     evidence = _evidence()
     assessor = OllamaEvidenceAssessor(_settings())
     retained, dropped = assessor.fit_evidence(_case(), [evidence])
     assert retained == [evidence]
     assert dropped == []
+
+
+def test_default_budget_keeps_one_1200_byte_excerpt_and_assesses_eight_bundles(
+    monkeypatch,
+) -> None:
+    assessor = OllamaEvidenceAssessor(_settings())
+    single = _evidence().model_copy(update={"excerpt": "x" * 1200, "context_blocks": []})
+    retained, dropped = assessor.fit_evidence(_case(), [single])
+    assert retained == [single]
+    assert dropped == []
+    bundles = [
+        _evidence().model_copy(
+            update={
+                "evidence_id": f"source-{i}",
+                "source_id": f"S{i:02}",
+                "excerpt": f"Method condition finding {i}. " + "x" * 1120,
+                "context_blocks": [
+                    _evidence()
+                    .context_blocks[0]
+                    .model_copy(
+                        update={
+                            "block_id": f"qualification-{i}",
+                            "text": "Exploratory result; validation not reported.",
+                        }
+                    )
+                ]
+                if i == 0
+                else [],
+            }
+        )
+        for i in range(8)
+    ]
+    retained, dropped = assessor.fit_evidence(_case(), bundles)
+    assert retained == bundles
+    assert dropped == []
+
+    dispatched = []
+
+    def request(*args, **kwargs):
+        dispatched.append(kwargs["payload"] if "payload" in kwargs else args[2])
+        return {
+            "done_reason": "stop",
+            "message": {
+                "content": json.dumps(
+                    {
+                        "observations": [],
+                        "support_assessments": [],
+                        "conflicts": [],
+                        "coverage": [],
+                    }
+                )
+            },
+        }
+
+    monkeypatch.setattr("spectro_ai.providers.ollama_request", request)
+    assessment = assessor(_case(), retained)
+    assert len(dispatched) == 1
+    sent_bundles = json.loads(dispatched[0]["messages"][1]["content"])["evidence_bundles"]
+    assert [bundle["evidence_id"] for bundle in sent_bundles] == [
+        item.evidence_id for item in bundles
+    ]
+    assert sent_bundles[0]["context_blocks"][0]["text"] == (
+        "Exploratory result; validation not reported."
+    )
+    assert {item.evidence_id for item in assessment.coverage} == {
+        item.evidence_id for item in bundles
+    }
+
+
+def test_estimator_uses_unicode_utf8_bytes_and_output_margin_boundary() -> None:
+    settings = _settings(output_tokens=128)
+    messages = [{"role": "user", "content": "é"}]
+    schema = {"type": "string"}
+    probe, _ = _budget_diagnostic("boundary", messages, schema, settings)
+    assert probe["component_bytes"]["messages"] == len(
+        json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    evidence = _evidence()
+    messages = OllamaEvidenceAssessor._messages(_case(), [evidence])
+    schema = OllamaEvidenceAssessor._schema([evidence])
+    sizes, fits = _budget_diagnostic("boundary", messages, schema, settings)
+    needed = (
+        sum(sizes["component_estimated_tokens"].values())
+        + settings.output_tokens
+        + sizes["safety_margin"]
+    )
+    assert fits
+    accepted, dropped = OllamaEvidenceAssessor(
+        _settings(context=needed, output_tokens=128)
+    ).fit_evidence(_case(), [evidence])
+    assert accepted == [evidence] and dropped == []
+    accepted, dropped = OllamaEvidenceAssessor(
+        _settings(context=needed - 1, output_tokens=128)
+    ).fit_evidence(_case(), [evidence])
+    assert accepted == [] and dropped == [evidence.evidence_id]
 
 
 def test_fit_drops_low_ranked_full_bundle_atomically() -> None:
@@ -109,22 +247,25 @@ def test_fit_drops_low_ranked_full_bundle_atomically() -> None:
         }
     )
     probe = OllamaEvidenceAssessor(_settings())
-    sizes = [
-        len(
-            json.dumps(
-                probe._messages(_case(), items), ensure_ascii=False, separators=(",", ":")
-            ).encode()
+    sizes = []
+    for items in ([first], [first, second]):
+        messages = probe._messages(_case(), items)
+        schema = probe._schema(items)
+        input_tokens = _estimate_tokens(messages)[1] + _estimate_tokens(schema)[1]
+        sizes.append(
+            input_tokens + probe.settings.output_tokens + max(512, ceil(input_tokens * 0.15))
         )
-        + len(json.dumps(probe._schema(items), separators=(",", ":")).encode())
-        + probe.settings.output_tokens
-        + 256
-        for items in ([first], [first, second])
-    ]
-    assessor = OllamaEvidenceAssessor(_settings(context=max(sizes[0], (sizes[0] + sizes[1]) // 2)))
-    retained, dropped = assessor.fit_evidence(_case(), [first, second])
+    assessor = OllamaEvidenceAssessor(_settings(context=sum(sizes) // 2))
+    with capture_budget_diagnostics() as diagnostics:
+        retained, dropped = assessor.fit_evidence(_case(), [first, second])
     assert retained == [first]
     assert dropped == ["source-2"]
     assert retained[0].context_blocks == first.context_blocks
+    before = next(item for item in diagnostics if item["stage"].endswith("before fitting"))
+    after = next(item for item in reversed(diagnostics) if item["stage"].endswith("after fitting"))
+    assert (
+        before["component_bytes"]["response_schema"] > after["component_bytes"]["response_schema"]
+    )
 
 
 def test_request_snapshot_excludes_budget_dropped_bundle(monkeypatch) -> None:
@@ -133,14 +274,15 @@ def test_request_snapshot_excludes_budget_dropped_bundle(monkeypatch) -> None:
         update={"evidence_id": "source-2", "source_id": "S02", "excerpt": "large " * 100}
     )
     probe = OllamaEvidenceAssessor(_settings())
-    sizes = [
-        len(json.dumps(probe._messages(_case(), items), ensure_ascii=False).encode())
-        + len(json.dumps(probe._schema(items)).encode())
-        + probe.settings.output_tokens
-        + 256
-        for items in ([first], [first, second])
-    ]
-    assessor = OllamaEvidenceAssessor(_settings(context=max(sizes[0], (sizes[0] + sizes[1]) // 2)))
+    sizes = []
+    for items in ([first], [first, second]):
+        messages = probe._messages(_case(), items)
+        schema = probe._schema(items)
+        input_tokens = _estimate_tokens(messages)[1] + _estimate_tokens(schema)[1]
+        sizes.append(
+            input_tokens + probe.settings.output_tokens + max(512, ceil(input_tokens * 0.15))
+        )
+    assessor = OllamaEvidenceAssessor(_settings(context=sum(sizes) // 2))
     retained, dropped = assessor.fit_evidence(_case(), [first, second])
     assert dropped == ["source-2"]
 
@@ -170,11 +312,23 @@ def test_structural_retry_is_bounded_and_records_calls(monkeypatch) -> None:
         return {"done_reason": "stop", "message": {"content": outputs.pop(0)}}
 
     monkeypatch.setattr("spectro_ai.providers.ollama_request", request)
-    result = OllamaEvidenceAssessor(_settings())(_case(), [_evidence()])
+    assessor = OllamaEvidenceAssessor(_settings())
+    with capture_budget_diagnostics() as diagnostics:
+        with request_stage("evidence follow-up"):
+            result = assessor(_case(), [_evidence()])
     assert len(calls) == 2
     assert result.diagnostics.call_count == 2
     assert result.coverage[0].evidence_id == "source-1"
     assert result.diagnostics.status == "partial"
+    assert [item["stage"] for item in diagnostics] == [
+        "evidence follow-up",
+        "evidence follow-up",
+    ]
+    assert [item["attempt"] for item in diagnostics] == [1, 2]
+    assert (
+        diagnostics[1]["component_bytes"]["messages"]
+        > diagnostics[0]["component_bytes"]["messages"]
+    )
 
 
 def test_provider_failure_is_not_retried_as_structural_error(monkeypatch) -> None:

@@ -393,7 +393,14 @@ if report is not None and st.session_state.get("report_input") == problem and no
                         st.markdown(f"**{locations} · {block.review_status}**")
                         st.markdown(block.text)
     with diagnostics_tab:
-        st.markdown(render_markdown(report, include_diagnostics=True))
+        technical_markdown = render_markdown(report, include_diagnostics=True)
+        st.download_button(
+            "Download technical diagnostics as Markdown",
+            data=technical_markdown,
+            file_name="spectro-ai-technical-diagnostics.md",
+            mime="text/markdown",
+        )
+        st.markdown(technical_markdown)
         diagnostics = getattr(report, "validation_diagnostics", [])
         if diagnostics:
             st.subheader("Deterministic validation")

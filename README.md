@@ -394,3 +394,35 @@ qualification. The generic permission guard withheld the resulting support recor
 and left the experiment technique unset. Passing software tests does not establish
 correct application interpretation; further model tuning stopped after two focused
 repairs. Details and runtime evidence are in the review protocol above.
+
+### Step 1 budget and extraction repair
+
+Request fitting uses token estimates rather than treating UTF-8 bytes as tokens.
+The initial estimate is one token per three serialized bytes, with configured
+output reserve and a safety margin of at least 512 tokens (or 15% of estimated
+input). Messages and response schemas are charged separately; schemas embedded
+inside prompts count as part of those prompts too. This is an estimate, not an
+exact tokenizer or a guarantee that a model request fits. Defaults remain 16,384
+context and 4,096 output tokens; no tokenizer download or reindex is required.
+
+Reports include `request_budget_diagnostics`, including requests rejected before
+dispatch, component sizes, selected/retained/dropped evidence IDs, and actual
+provider token counts when returned. Raw request contents remain session-local.
+Fitting preserves whole evidence bundles and their qualifications; synthesis
+overflow preserves the completed evidence assessment in an abstention report.
+
+New extractions distinguish exact customer quotations from quote-backed
+interpretations. Industry inferred from customer wording belongs in
+`inferred_customer_context`, visibly marked as unverified inference. It does not
+populate authoritative industry or participate in retrieval, required-field gates,
+or scientific customer-condition comparisons. Historical reports retain their
+recorded provenance. Extraction omission and validation removal have distinct
+warnings; neither is repaired by an offline keyword parser.
+
+See [repair backlog and acceptance](PLAN_STEP1_REPAIR.md) and
+[verification results](docs/STEP1_REPAIR_VERIFICATION.md). The repository D01 replay
+retained all seven verified technical excerpts and produced an evidence assessment;
+an independent extraction replay retained laboratory, pilot and decision-stage
+facts. The scientific pipeline still abstained after citation/method checks.
+Scientific acceptance, exact historical-run comparison, and Step 2 remain separate
+gates.

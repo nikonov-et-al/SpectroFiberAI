@@ -212,11 +212,60 @@ def render_markdown(report: AssessmentReport, *, include_diagnostics: bool = Fal
     lines += ["", "## Field provenance", ""] + _bullets(
         [f"{field}: {origin}" for field, origin in case.field_provenance.items()]
     )
+    if case.inferred_customer_context:
+        lines += ["", "## Unverified inferred customer context", ""] + _bullets(
+            [
+                f"{item.field}: {item.value} — {item.rationale} "
+                f"Supporting wording: {item.supporting_quote}"
+                for item in case.inferred_customer_context
+            ]
+        )
     lines += ["", "## Supporting customer quotes", ""] + _bullets(
         [f"{field}: {quote}" for field, quote in case.field_quotes.items()]
     )
     lines += ["", "## Extraction warnings", ""] + _bullets(case.extraction_warnings)
     lines += ["", "## Assessment warnings", ""] + _bullets(report.assessment_warnings)
+    if report.request_budget_diagnostics:
+        lines += ["", "## Request budget diagnostics", ""]
+        for item in report.request_budget_diagnostics:
+            tokens = sum(item.component_estimated_tokens.values())
+            lines.append(
+                f"- {_safe(item.stage)} attempt {item.attempt} · "
+                f"{_safe(item.provider or 'unknown')}:{_safe(item.model or 'unknown')} · "
+                f"estimator {_safe(item.estimator_version)} · {item.fit_decision}"
+            )
+            lines.append(
+                f"  - Estimated input {tokens} tokens; context {item.context_limit}; "
+                f"output reserve {item.output_reserve}; margin {item.safety_margin}."
+            )
+            lines.append(
+                "  - Components: "
+                + "; ".join(
+                    f"{_safe(name)} {item.component_bytes.get(name, 0)} bytes / "
+                    f"{count} estimated tokens"
+                    for name, count in item.component_estimated_tokens.items()
+                )
+            )
+            lines.append(
+                "  - Evidence IDs: selected "
+                + _safe(", ".join(item.selected_evidence_ids) or "none")
+                + "; retained "
+                + _safe(", ".join(item.retained_evidence_ids) or "none")
+                + "; dropped "
+                + _safe(", ".join(item.dropped_evidence_ids) or "none")
+            )
+            prompt_usage = (
+                item.provider_prompt_tokens
+                if item.provider_prompt_tokens is not None
+                else "unknown"
+            )
+            completion_usage = (
+                item.provider_completion_tokens
+                if item.provider_completion_tokens is not None
+                else "unknown"
+            )
+            usage = f"{prompt_usage} prompt / {completion_usage} completion tokens"
+            lines.append(f"  - Provider-reported usage: {usage}.")
     diagnostics = getattr(report, "validation_diagnostics", [])
     if diagnostics:
         lines += ["", "## Deterministic validation", ""]
@@ -422,6 +471,14 @@ def _customer_markdown(report: AssessmentReport) -> str:
     lines += ["", "## Missing information", ""] + _bullets(
         [field.replace("_", " ") for field in report.missing_information]
     )
+    if case.inferred_customer_context:
+        lines += ["", "## Unverified inferred context", ""] + _bullets(
+            [
+                f"{item.field}: {item.value} (unverified inference; "
+                f"based on: {item.supporting_quote})"
+                for item in case.inferred_customer_context
+            ]
+        )
     lines += ["", "## Follow-up questions", ""] + _bullets(report.suggested_technical_questions)
     lines += ["", "## Preliminary candidates", ""]
     sources = {item.evidence_id: item for item in report.retrieved_evidence}

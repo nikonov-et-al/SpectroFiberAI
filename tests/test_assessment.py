@@ -443,6 +443,7 @@ def test_grounded_assessment_binds_candidate_to_validated_excerpt(
     assert report.status == "provisional"
     assert report.assessment_method == "ollama_grounded"
     assert report.assessment_provider == "ollama"
+    assert report.evidence_assessment is not None
     assert report.evidence_set_version != "manifest-v1"
     assert report.candidate_techniques[0].supporting_evidence_ids == ["S01-p17"]
     assert (
@@ -454,6 +455,47 @@ def test_grounded_assessment_binds_candidate_to_validated_excerpt(
     assert len(source.searched) == 1
     assert source.searched[0].target_analyte_or_property == "protein"
     assert source.searched[0].unknown_or_missing_information
+
+
+def test_all_dropped_evidence_report_keeps_budget_diagnostics() -> None:
+    class DropEverything:
+        def fit_evidence(self, use_case, retrieved):
+            dropped = [item.evidence_id for item in retrieved]
+            from spectro_ai.request_trace import record_budget_diagnostic
+
+            record_budget_diagnostic(
+                {
+                    "stage": "evidence assessment after fitting",
+                    "context_limit": 16384,
+                    "output_reserve": 4096,
+                    "safety_margin": 512,
+                    "fit_decision": "estimated budget exceeded",
+                    "selected_evidence_ids": dropped,
+                    "retained_evidence_ids": [],
+                    "dropped_evidence_ids": dropped,
+                }
+            )
+            return [], dropped
+
+        def __call__(self, *args, **kwargs):
+            pytest.fail("assessment must stop when no bundle fits")
+
+    report = assess_use_case(
+        case(),
+        retriever=FakeRetriever(),
+        assessor=FakeAssessor(),
+        evidence_assessor=DropEverything(),
+    )
+    assert report.retrieved_evidence == []
+    assert report.evidence_assessment is None
+    after_fit = [
+        item
+        for item in report.request_budget_diagnostics
+        if item.stage == "evidence assessment after fitting"
+    ]
+    assert after_fit and after_fit[-1].selected_evidence_ids == ["S01-p17"]
+    assert after_fit[-1].retained_evidence_ids == []
+    assert after_fit[-1].dropped_evidence_ids == ["S01-p17"]
 
 
 def test_unknown_or_unrelated_candidate_evidence_is_removed(

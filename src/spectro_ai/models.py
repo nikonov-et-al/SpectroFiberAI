@@ -171,6 +171,13 @@ CUSTOMER_FACT_FIELDS = (
 )
 
 
+class InferredCustomerContext(DomainModel):
+    field: Literal["industry"]
+    value: str
+    supporting_quote: str
+    rationale: str
+
+
 class CustomerUseCase(DomainModel):
     FACT_FIELDS: ClassVar[tuple[str, ...]] = CUSTOMER_FACT_FIELDS
     source_text: Annotated[str, StringConstraints(strip_whitespace=False)] | None = None
@@ -205,6 +212,7 @@ class CustomerUseCase(DomainModel):
     strict_requirements: list[str] = Field(default_factory=list)
     field_quotes: dict[str, str] = Field(default_factory=dict)
     field_provenance: dict[str, str] = Field(default_factory=dict)
+    inferred_customer_context: list[InferredCustomerContext] = Field(default_factory=list)
     unknown_or_missing_information: list[str] = Field(default_factory=list)
     ambiguities: list[str] = Field(default_factory=list)
     contradictions: list[str] = Field(default_factory=list)
@@ -468,6 +476,25 @@ class ValidationDiagnostic(DomainModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class RequestBudgetDiagnostic(DomainModel):
+    stage: str
+    attempt: int = 1
+    provider: str | None = None
+    model: str | None = None
+    estimator_version: str = "utf8-bytes-div3-v1"
+    context_limit: int
+    output_reserve: int
+    safety_margin: int
+    component_bytes: dict[str, int] = Field(default_factory=dict)
+    component_estimated_tokens: dict[str, int] = Field(default_factory=dict)
+    selected_evidence_ids: list[str] = Field(default_factory=list)
+    retained_evidence_ids: list[str] = Field(default_factory=list)
+    dropped_evidence_ids: list[str] = Field(default_factory=list)
+    fit_decision: str
+    provider_prompt_tokens: int | None = None
+    provider_completion_tokens: int | None = None
+
+
 class AssessmentReport(DomainModel):
     extracted_requirements: CustomerUseCase
     missing_information: list[str] = Field(default_factory=list)
@@ -491,3 +518,4 @@ class AssessmentReport(DomainModel):
     retrieval_diagnostics: list[RetrievalDiagnostic] = Field(default_factory=list)
     query_diagnostics: QueryDiagnostics | None = None
     evidence_assessment: EvidenceAssessment | None = None
+    request_budget_diagnostics: list[RequestBudgetDiagnostic] = Field(default_factory=list)

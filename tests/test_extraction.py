@@ -1,15 +1,20 @@
 import json
+from math import ceil
 
 import pytest
 from pydantic import ValidationError
 
+from spectro_ai.guardrails import abstention_report
 from spectro_ai.intake import EDITABLE_FIELDS
-from spectro_ai.models import CustomerUseCase
+from spectro_ai.models import AssessmentReport, CustomerUseCase
 from spectro_ai.providers import (
     ExtractionSettings,
     OllamaUseCaseExtractor,
     ProviderError,
+    _clean_extraction,
+    _estimate_tokens,
     _extraction_prompt,
+    _extraction_schema,
     assess_problem,
 )
 
@@ -188,7 +193,7 @@ def test_extraction_rejects_oversized_complete_input_before_network(
         "spectro_ai.providers.ollama_request",
         lambda *args, **kwargs: pytest.fail("oversized input must not be sent"),
     )
-    with pytest.raises(ProviderError, match="complete customer text"):
+    with pytest.raises(ProviderError, match="context budget"):
         OllamaUseCaseExtractor(ExtractionSettings(context=4096)).extract("x" * 5000)
 
 
@@ -197,8 +202,12 @@ def test_extraction_context_reserves_configured_output_budget(
 ) -> None:
     text = "water"
     output_tokens = 2000
-    prompt_bytes = len((_extraction_prompt() + text).encode("utf-8"))
-    minimum_context = prompt_bytes + output_tokens + 256
+    messages = [
+        {"role": "system", "content": _extraction_prompt()},
+        {"role": "user", "content": text},
+    ]
+    minimum_context = sum(_estimate_tokens(value)[1] for value in (messages, _extraction_schema()))
+    minimum_context += output_tokens + max(512, ceil(minimum_context * 0.15))
     monkeypatch.setattr(
         "spectro_ai.providers.ollama_request",
         lambda *args, **kwargs: model_reply(
@@ -213,6 +222,121 @@ def test_extraction_context_reserves_configured_output_budget(
         ExtractionSettings(context=minimum_context, output_tokens=output_tokens)
     ).extract(text)
     assert case.sample_matrix == "water"
+
+
+def test_d01_process_stages_survive_extraction_and_industry_is_inferred() -> None:
+    text = (
+        "We manufacture tablets from a powder blend containing an active pharmaceutical "
+        "ingredient and excipients. Laboratory checks tell us whether the blend is on target, "
+        "but results arrive after the material has moved through the press. We want to assess "
+        "whether a fiber based measurement in the feed frame could follow API concentration "
+        "changes. Our first pilot should compare reasonable measurement options before we commit "
+        "to production equipment."
+    )
+    raw = CustomerUseCase(
+        reference_measurement="laboratory checks",
+        deployment_mode="first pilot",
+        desired_stage="before committing to production equipment",
+        industry="pharmaceutical",
+        field_quotes={
+            "reference_measurement": "Laboratory checks",
+            "deployment_mode": "first pilot",
+            "desired_stage": "before we commit to production equipment",
+            "industry": "active pharmaceutical ingredient",
+        },
+        inferred_customer_context=[
+            {
+                "field": "industry",
+                "value": "pharmaceutical",
+                "supporting_quote": "active pharmaceutical ingredient",
+                "rationale": "Product wording suggests this sector.",
+            }
+        ],
+    )
+    cleaned = _clean_extraction(raw.model_dump_json(), text)
+    assert cleaned.reference_measurement == "laboratory checks"
+    assert cleaned.deployment_mode == "first pilot"
+    assert cleaned.desired_stage == "before committing to production equipment"
+    assert cleaned.industry is None
+    assert cleaned.inferred_customer_context[0].value == "pharmaceutical"
+    assert cleaned.field_provenance["reference_measurement"] == "quote-backed interpretation"
+    assert cleaned.field_provenance["deployment_mode"] == "customer quote"
+    assert cleaned.field_provenance["desired_stage"] == "quote-backed interpretation"
+
+
+def test_inferred_industry_requires_literal_quote() -> None:
+    raw = CustomerUseCase(
+        inferred_customer_context=[
+            {
+                "field": "industry",
+                "value": "pharmaceutical",
+                "supporting_quote": "pharmaceutical",
+                "rationale": "guess",
+            }
+        ]
+    )
+    cleaned = _clean_extraction(raw.model_dump_json(), "We make tablets.")
+    assert not cleaned.inferred_customer_context
+    assert any("inferred industry" in warning for warning in cleaned.extraction_warnings)
+
+
+def test_historical_customer_model_defaults_new_inference_field_to_empty() -> None:
+    historical = CustomerUseCase.model_validate(
+        {"source_text": "Old report text.", "industry": "Food processing"}
+    )
+    assert historical.industry == "Food processing"
+    assert historical.inferred_customer_context == []
+
+
+def test_historical_report_without_new_fields_preserves_provenance() -> None:
+    historical_case = CustomerUseCase(
+        source_text="Old report text.",
+        industry="Food processing",
+        field_provenance={"industry": "customer quote"},
+    )
+    payload = abstention_report(historical_case, "Historical report.").model_dump(mode="json")
+    payload.pop("request_budget_diagnostics")
+    payload["extracted_requirements"].pop("inferred_customer_context")
+
+    loaded = AssessmentReport.model_validate(payload)
+    assert loaded.request_budget_diagnostics == []
+    assert loaded.extracted_requirements.inferred_customer_context == []
+    assert loaded.extracted_requirements.field_provenance == {"industry": "customer quote"}
+
+
+@pytest.mark.parametrize(
+    "industry", ["plastics recycling", "food processing", "novel materials recovery"]
+)
+def test_explicit_labeled_industry_is_retained_without_sector_allowlist(industry: str) -> None:
+    text = f"We process samples.\nIndustry: {industry}"
+    raw = CustomerUseCase(industry=industry, field_quotes={"industry": industry})
+    cleaned = _clean_extraction(raw.model_dump_json(), text)
+    assert cleaned.industry == industry
+    assert not cleaned.inferred_customer_context
+
+
+def test_assess_problem_keeps_extraction_budget_without_outer_trace_and_resets(monkeypatch) -> None:
+    monkeypatch.setenv("SPECTRO_AI_PROVIDER", "ollama")
+    monkeypatch.setattr(
+        "spectro_ai.providers.ollama_request",
+        lambda *_args, **_kwargs: {"done_reason": "stop", **model_reply(sample_matrix="water")},
+    )
+    monkeypatch.setattr(
+        "spectro_ai.providers._assess_use_case",
+        lambda case, **_kwargs: abstention_report(case, "test", status="insufficient_information"),
+    )
+    report = assess_problem("water", retriever=object())
+    assert [item.stage for item in report.request_budget_diagnostics] == [
+        "extraction preflight",
+        "extraction",
+    ]
+
+    class NoBudgetExtractor:
+        def extract(self, text: str) -> CustomerUseCase:
+            return CustomerUseCase(source_text=text)
+
+    later = assess_problem("next", extractor=NoBudgetExtractor(), retriever=object())
+    assert later.request_budget_diagnostics == []
 
 
 def test_timeout_is_reported_without_provider_switch(

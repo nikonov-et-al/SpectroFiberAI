@@ -4,7 +4,14 @@ from urllib.error import URLError
 import pytest
 
 from spectro_ai.providers import ExtractionSettings, ollama_request
-from spectro_ai.request_trace import RequestTrace, capture_requests, record_request, request_stage
+from spectro_ai.request_trace import (
+    RequestTrace,
+    capture_budget_diagnostics,
+    capture_requests,
+    record_budget_diagnostic,
+    record_request,
+    request_stage,
+)
 
 
 def test_request_snapshots_are_deep_copied_and_scoped():
@@ -93,3 +100,39 @@ def test_context_traces_are_isolated_between_threads():
 
     assert first.requests[0]["request"]["messages"] == ["first"]
     assert second.requests[0]["request"]["messages"] == ["second"]
+
+
+def test_embedding_usage_does_not_overwrite_chat_budget_usage(monkeypatch):
+    from io import BytesIO
+
+    from spectro_ai import providers
+
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/api/embed"):
+            return Response(b'{"prompt_eval_count":999}')
+        return Response(b'{"prompt_eval_count":42,"eval_count":7,"message":{"content":"ok"}}')
+
+    monkeypatch.setattr(providers, "urlopen", fake_urlopen)
+    diagnostic = {
+        "stage": "retrieval query generation",
+        "provider_prompt_tokens": None,
+        "provider_completion_tokens": None,
+    }
+    with capture_budget_diagnostics() as captured:
+        record_budget_diagnostic(diagnostic)
+        ollama_request(ExtractionSettings(), "/api/embed", {"model": "embed", "input": "q"})
+        assert captured[0]["provider_prompt_tokens"] is None
+        ollama_request(
+            ExtractionSettings(),
+            "/api/chat",
+            {"model": "chat", "messages": [{"role": "user", "content": "q"}]},
+        )
+        assert captured[0]["provider_prompt_tokens"] == 42
+        assert captured[0]["provider_completion_tokens"] == 7

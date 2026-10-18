@@ -20,6 +20,19 @@ or a strict requirement. Each quote must justify the meaning of its destination
 field, not merely contain matching words. Keep unresolved alternatives ambiguous;
 do not silently choose one.
 
+Recognize process-control stages from wording such as "laboratory checks", "first
+pilot", and "before committing to production equipment". Map these to the appropriate
+reference_measurement, deployment_mode, and desired_stage fields while preserving
+conditional intent. For example, "we want laboratory checks before our first pilot"
+does not mean a pilot is already deployed. Negated statements must remain negated.
+Do not label a customer pharmaceutical from a product such as tablets alone; if a
+sector seems likely, keep it as unverified inference rather than customer-stated industry.
+In particular, "We manufacture tablets from a powder blend containing an active
+pharmaceutical ingredient" states product composition, not that the customer is a
+pharmaceutical company. If inferred_customer_context is available in the schema, put
+that possible sector there with the exact supporting phrase and rationale; leave industry
+null. Populate inferred_customer_context only for industry, never for measurements.
+
 Use `null` for unknown scalar values and empty lists for unknown collections. Preserve
 customer quantities and units as text; do not calculate or normalize them. Do not
 infer unstated temperature, pressure, concentration, accuracy, response time, limits,
@@ -34,5 +47,11 @@ supported by an exact input quote under `ambiguity_0`, `ambiguity_1`,
 
 For example, for input `We monitor moisture in grain.` a valid partial answer is:
 {"measurement_objective":"monitor moisture","target_analyte_or_property":"moisture","sample_matrix":"grain","field_quotes":{"measurement_objective":"monitor moisture","target_analyte_or_property":"moisture","sample_matrix":"grain"}}
+
+For input `Our first pilot should compare measurement options before we commit to
+production equipment.`, preserve the two distinct facts: `deployment_mode` is
+`first pilot`, quoted by `first pilot`; `desired_stage` is `before we commit to
+production equipment`, quoted by that same exact phrase. Do not assign `first pilot`
+to `desired_stage` or leave `deployment_mode` empty.
 
 Return one JSON object matching the supplied schema. No Markdown or extra commentary.

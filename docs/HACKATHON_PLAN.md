@@ -1,5 +1,20 @@
 # Hackathon plan
 
+## Step 1 reliability repair — 2026-10-18
+
+User-approved repair addresses premature evidence loss from mixed byte/token
+budget accounting and separately distinguishes extracted customer facts from
+inferred industry. Keep default context/output limits unchanged, preserve complete
+evidence qualifications, and export stage-level budget diagnostics. Local runtime
+replay and scientific review are distinct gates; successful evidence flow does not
+validate candidate usefulness. The repository D01 enquiry replay retained seven
+verified technical excerpts and recorded an evidence assessment; citation/method
+guards still withheld recommendations. A focused extraction replay retained the
+laboratory/pilot/decision-stage facts and separated inferred industry. Original
+customer attachments are unavailable, so exact historical-run comparison remains
+pending. Step 2 is not authorized by this repair. See [repair backlog](../PLAN_STEP1_REPAIR.md)
+and [verification evidence](STEP1_REPAIR_VERIFICATION.md).
+
 ## Architecture update — 2026-10-18
 
 User approved removal of offline parser, deterministic recommendations and all fallback.
