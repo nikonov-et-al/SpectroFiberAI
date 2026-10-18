@@ -17,13 +17,15 @@ $env:UV_CACHE_DIR = Join-Path $PWD '.cache\uv'
 $env:UV_PYTHON_DOWNLOADS = 'never'
 uv sync --locked --extra rag
 ollama pull gemma4:12b-it-q4_K_M
+ollama pull qwen3-embedding:0.6b
 uv run python -m spectro_ai.evidence reindex
 uv run streamlit run app.py
 ```
 
 Before indexing, place authorized AFS files listed in `knowledge/sources.yaml` under
 `knowledge/data/materials/`. These ignored source files are not bundled in Git.
-Missing source/index prerequisites are reported explicitly.
+Add additional authorized PDF, Markdown or TXT files under ignored `documents/`.
+Both inputs feed one SQLite knowledge base. Missing prerequisites are reported explicitly.
 
 Ollama must be running at `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`).
 `SPECTRO_AI_PROVIDER` defaults to `ollama`; `OLLAMA_MODEL` selects installed model.
@@ -69,8 +71,9 @@ validation remain necessary. No numerical confidence is invented.
 
 - `models.py`: typed Pydantic domain contracts, provenance, validation diagnostics.
 - `providers.py`: Ollama/OpenAI extraction and technical assessment adapters and pipeline.
-- `evidence.py`: allowlisted AFS document ingestion and local BM25 retrieval with pages,
-  excerpts, content hashes, scope and review flags. Ingestion parsers are retained.
+- `evidence.py`: shared ingestion, SQLite storage, BM25 + semantic retrieval and
+  rank fusion, retaining pages, excerpts, hashes, scope and review flags.
+- `rag.py`: compatibility CLI for indexing/searching the same knowledge base.
 - `intake.py`: validated expert corrections. `reporting.py`: stable Markdown export.
 - `prompts/`: shared versioned prompts. `knowledge/techniques.yaml`: curated profiles;
   profiles do not execute recommendation rules.
@@ -112,23 +115,45 @@ prior runs overstated fusion benefits, transferred application evidence, and tre
 source pathlength as customer configuration. New guardrails do not replace expert
 review. H01–H06 must use identical pipeline without per-case prompt/rule tuning.
 
-## Separate Document Q&A
+## Unified knowledge base
 
-Document Q&A retains independent provider/index settings. Install `rag` extra; use
-Ollama embedding model `qwen3-embedding:0.6b`. Put authorized TXT/Markdown or text PDFs
-under ignored `documents/`, then:
+Spectroscopy assessment is the only question-to-report workflow. Standalone Document
+Q&A, answer models and prompt are removed. Local Ollama embeddings remain independent
+of the configured Ollama/OpenAI assessment generator.
+
+Use **Update Knowledge Base** in Streamlit after adding, changing or removing files.
+The panel shows readiness, document/chunk counts, embedding model and last successful
+update. Indexing occurs only on explicit update, never on app rerun or assessment.
+New/changed chunks receive embeddings; unchanged chunks reuse stored vectors. Updates
+validate a staging SQLite database before atomic replacement. Failures preserve the
+last committed index. Reports record the exact index revision; changes hide stale
+reports and exports. Existing assessments use a pinned snapshot through validation.
 
 ```powershell
 ollama pull qwen3-embedding:0.6b
-uv run python -m spectro_ai.rag index --documents documents
+uv run python -m spectro_ai.evidence reindex
 uv run python -m spectro_ai.rag search "Which limitations are documented?"
-uv run python -m spectro_ai.rag ask "Which limitations are documented?"
 ```
 
-`SPECTRO_RAG_PROVIDER=ollama|openai` controls answer generation; query embeddings still
-need Ollama. Default index `.cache/rag/index.sqlite3`. Rebuild with `--rebuild` after
-embedding model changes. Scanned PDFs/OCR remain unsupported. Document Q&A does not
-replace assessment evidence retrieval or scientifically validate answers.
+Default database: `.cache/rag/index.sqlite3` (`SPECTRO_RAG_INDEX`). Old independent
+JSON/Document Q&A indexes are incompatible; rebuild with the update button or CLI.
+Source files and historical reports are preserved. No vector database or extra
+framework is needed. Exact cosine scan suits the small local corpus; similarity
+is a retrieval score, never scientific confidence. Scanned PDFs need external OCR.
+
+Requirements produce targeted queries for application, objective, setup and limitations,
+without scenario-specific technique rules. BM25 and semantic rankings combine with
+Reciprocal Rank Fusion; raw scores are never added. Whole excerpts fit the retrieval
+budget, then the existing provider context fitter bounds the complete assessment.
+A retrieved source still requires claim membership checks and expert scientific review.
+
+Initial retrieval defaults: 30 BM25 candidates, 30 semantic candidates, 8 final
+excerpts, RRF constant 60, and 12,000 UTF-8 bytes of excerpt context. Candidate counts,
+RRF and context budget can be supplied to `EvidenceRetriever`; final assessment count
+uses `SPECTRO_RAG_EVIDENCE_COUNT`. Chunking defaults to 1,200 characters with 180
+characters of overlap (`SPECTRO_RAG_CHUNK_SIZE`, `SPECTRO_RAG_CHUNK_OVERLAP`). Changing
+chunking or embedding identity requires an update and prevents unsafe vector reuse.
+These defaults are engineering choices, not measured scientific optima.
 
 See [architecture](docs/ARCHITECTURE.md), [decisions](docs/DECISIONS.md),
 [hackathon plan](docs/HACKATHON_PLAN.md), and [pending backlog](PLAN.md).

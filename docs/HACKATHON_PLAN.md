@@ -18,8 +18,8 @@ open. Prior counts below are historical.
 - Experimental Ollama/OpenAI assessment using the allowlisted AFS index. Reports bind citations to retrieved excerpts and preserve source/page/review metadata; unsupported and insufficient-information outcomes are labeled separately. Phase 3 live acceptance is pending: D01/D02 still show semantic transfer errors after two focused repairs. Ollama is default; no baseline path remains. This path is not scientifically validated for demo claims.
 - Five preliminary technique profiles with provenance and expert-review flags.
 - Streamlit demo, four synthetic scenarios, structured JSON, Markdown and JSON downloads.
-- Independent local document RAG with Ollama embeddings and Ollama/API generation; assessment now also supports explicit OpenAI selection.
-- Separate allowlisted AFS evidence index with local BM25 retrieval; source/page hashes and review flags are preserved and consumed by the grounded assessment.
+- Unified SQLite knowledge base with persisted Ollama embeddings and BM25/RRF hybrid retrieval for assessment. Streamlit Update Knowledge Base performs incremental atomic updates; reports retain index revisions.
+- Curated AFS source metadata and folder-based PDF/MD/TXT additions share chunks and citations. Standalone Document Q&A removed; expert acceptance remains open.
 - Tests, Ruff, GitHub Actions checks.
 - Structured expert answers/corrections, field provenance, consequential questions,
   contextual candidate conditions, conditional geometry, tailored study outcome branches.
@@ -105,12 +105,12 @@ Choose against the actual rubric.
 Confirm acceptance criteria/assets; validate knowledge/rules with experts; implement
 one challenge-specific workflow with regression coverage.
 
-## Document RAG rehearsal
+## Knowledge-base rehearsal
 
 - [x] Install `rag` extra, local Ollama, and configured generation/embedding models.
 - [ ] Index only authorized documents; inspect page/line provenance and search results.
 - [x] Rehearse supported/unsupported questions with real Ollama; test unavailable models and rebuild offline.
-- [ ] Confirm question/excerpt transfer is acceptable before choosing API generation.
+- [ ] Confirm customer enquiry and evidence transfer is acceptable before choosing OpenAI assessment.
 - [x] Measure GPU residency, post-run total VRAM, indexing time, and answer latency on the RTX 4070 (single synthetic run; no peak-memory claim).
 - [ ] Review cited statements against source passages; similarity is not confidence.
 - [ ] Preserve four original synthetic inputs through the LLM pipeline.

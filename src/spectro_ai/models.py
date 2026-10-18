@@ -213,6 +213,7 @@ class AssessmentReport(DomainModel):
     )
     assessment_provider: Literal["ollama", "openai"] | None = None
     evidence_set_version: str | None = None
+    knowledge_index_revision: str | None = None
     retrieved_evidence: list[RetrievedEvidence] = Field(default_factory=list)
     report_version: str = "grounded-v1"
     assessment_warnings: list[str] = Field(default_factory=list)

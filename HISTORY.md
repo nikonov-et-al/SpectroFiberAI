@@ -555,3 +555,36 @@ preserved raw JSON/Markdown and summary under `.cache/grounded-evaluation-202610
 Verification: command exit 0; 31 completed, 0 runtime failures. Results and limitations
 recorded in docs/LLM_EVALUATION.md. No manual answer edits or paid requests.
 Deviation: automated/software review only; expert scientific acceptance remains pending.
+
+## Completed — 2026-10-18 — Unified hybrid assessment knowledge base
+
+### Original task objective
+
+Refactor the existing SpectroFiberAI repository to use **one unified knowledge base with hybrid retrieval (BM25 + semantic search)** for the main spectroscopy assessment.
+
+Remove the separate Document Q&A functionality and introduce an **Update Knowledge Base** button in Streamlit.
+
+### Implementation and verification
+
+Reused ingestion, Ollama embeddings and SQLite in one assessment knowledge index.
+Added incremental atomic updates, structure-aware chunks, targeted requirement queries,
+RRF fusion, immutable assessment snapshots and revision-based report invalidation.
+Removed standalone Q&A UI, generation adapter, models and prompt. Preserved provenance
+and existing claim-level safety checks, including rejection of unsupported essential
+rationales. Scientific acceptance gates in PLAN.md remain pending.
+
+Verification: `uv run pytest` — 121 passed; `uv run ruff check .` — passed;
+`uv run ruff format --check .` — passed (49 Python files). Streamlit AppTest
+passed outside the Windows sandbox; temporary HTTP health returned 200/ok and stopped.
+Real local Ollama smoke: 7 source documents, 197 chunks, 1,024-dimensional vectors;
+repeat update generated zero new embeddings and reused 197. Real D01 completed through
+hybrid retrieval, validation and exports with a provisional source-backed comparison.
+This verifies software operation, not scientific suitability. Details and limitations:
+[SEMANTIC_SEARCH.md](docs/SEMANTIC_SEARCH.md).
+
+Deviation: retained existing AFS manifest ingestion alongside folder additions in the
+same database; BM25 statistics are derived from committed chunks at retrieval time.
+No new dependency, vector service or framework. Initial user edits remain uncommitted;
+checks cover the combined working tree. Isolated staged tests: 110 passed and three
+pre-existing HEAD failures, each independently confirmed against untouched HEAD.
+No unrelated PLAN.md acceptance gate closed.

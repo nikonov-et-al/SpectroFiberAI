@@ -23,7 +23,11 @@ have separate provenance. Quote membership does not prove correct interpretation
 
 ## Evidence and validation
 
-`evidence.py` ingests allowlisted AFS files into local BM25 index. Document parsers
+`evidence.py` ingests allowlisted AFS files and authorized `documents/` files into
+one persistent SQLite knowledge index. It stores source metadata, chunks and Ollama
+embeddings; BM25 is rebuilt from those same stored chunks at retrieval time. Targeted
+requirement queries drive cosine retrieval and BM25; Reciprocal Rank Fusion combines
+rankings. No second chunker or document store remains. Document parsers
 remain necessary: PDF pages, text spans, DOCX sections and spreadsheet rows retain
 locations, hashes, scope and review status. Evaluation answers never enter technical
 corpus. Existing `KnowledgeSource` contract and curated YAML vocabulary remain.
@@ -41,8 +45,10 @@ stated by customer; otherwise TBD. Plans require references and held-out validat
 Expert corrections preserve original enquiry and unchanged provenance. Pending edits,
 input changes, configuration changes and failures hide stale reports/exports. Markdown
 escapes untrusted text; JSON exports domain model. OpenAI mode discloses transfer of
-customer text/facts and evidence before submission. Separate Document Q&A retains its
-own model and embedding configuration.
+customer text/facts and evidence before submission. Knowledge updates run only on explicit clicks. A validated staging database atomically
+replaces the prior index; failed updates preserve it. Assessments pin one index snapshot,
+record its revision, and the UI invalidates reports after successful index changes.
+Standalone Document Q&A is removed.
 
 Legacy parser APIs, baseline provider and fallback parameter are intentionally removed.
 Historical artifacts are preserved; no persisted user-data migration is performed.

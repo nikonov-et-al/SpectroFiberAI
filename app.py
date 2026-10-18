@@ -7,9 +7,9 @@ from pathlib import Path
 
 import streamlit as st
 
+from spectro_ai import providers
 from spectro_ai.intake import EDITABLE_FIELDS, correct_requirements
-from spectro_ai.providers import RagSettings, assess_problem, assess_use_case
-from spectro_ai.rag import ask, load_index, render_answer
+from spectro_ai.providers import assess_problem, assess_use_case
 from spectro_ai.reporting import render_markdown
 
 ROOT = Path(__file__).resolve().parent
@@ -71,6 +71,68 @@ if provider == "openai":
         "OpenAI endpoint. Retrieved source excerpts are also sent for technical assessment."
     )
 
+knowledge_config_signature = (
+    os.getenv("SPECTRO_RAG_INDEX", ".cache/rag/index.sqlite3"),
+    os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b"),
+    os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+    os.getenv("SPECTRO_RAG_EVIDENCE_COUNT", "8"),
+    os.getenv("SPECTRO_RAG_CONTEXT", "4096"),
+)
+try:
+    retriever = providers.EvidenceRetriever()
+    knowledge_status = retriever.knowledge_status()
+except ValueError as exc:
+    retriever = None
+    knowledge_status = {"ready": False, "revision": None, "error": str(exc)}
+st.subheader("Knowledge base")
+if knowledge_status.get("ready"):
+    st.caption(
+        f"Ready · {knowledge_status.get('mode', 'hybrid').upper()} retrieval · "
+        f"{knowledge_status.get('documents', 0)} documents · "
+        f"{knowledge_status.get('chunks', 0)} chunks · "
+        f"embeddings: {knowledge_status.get('embedding_model') or 'not configured'} · "
+        f"last successful update: {knowledge_status.get('indexed_at') or 'unknown'}"
+    )
+else:
+    st.info(
+        knowledge_status.get("message")
+        or "Knowledge index unavailable. Add supported files to documents/ and update it."
+    )
+if knowledge_status.get("error"):
+    st.error(knowledge_status["error"])
+if st.button("Update Knowledge Base", key="update_knowledge_base"):
+    st.session_state.pop("knowledge_update_result", None)
+    if retriever is None:
+        st.error("Knowledge base settings are invalid. Correct them before updating.")
+    else:
+        try:
+            with st.status("Updating knowledge base…", expanded=True) as update_status:
+                result = retriever.update_knowledge_base()
+                update_status.update(label="Knowledge base updated", state="complete")
+            st.session_state.pop("report", None)
+            st.session_state.pop("report_signature", None)
+            st.session_state.knowledge_update_result = result
+            st.rerun()
+        except (OSError, RuntimeError, ValueError) as exc:
+            st.error(f"Knowledge base update failed: {exc}")
+
+update_result = st.session_state.get("knowledge_update_result")
+if update_result:
+    document_counts = update_result.get("documents", {})
+    indexed_documents = sum(document_counts.get(key, 0) for key in ("new", "updated", "unchanged"))
+    embedding_counts = update_result.get("embeddings", {})
+    st.success(
+        "Knowledge base updated successfully. "
+        f"Indexed documents: {indexed_documents} · "
+        f"New: {document_counts.get('new', 0)} · "
+        f"Updated: {document_counts.get('updated', 0)} · "
+        f"Removed: {document_counts.get('removed', 0)} · "
+        f"Unchanged: {document_counts.get('unchanged', 0)} · "
+        f"Indexed chunks: {update_result.get('chunks', 0)} · "
+        f"New embeddings: {embedding_counts.get('new', 0)} · "
+        f"Reused embeddings: {embedding_counts.get('reused', 0)}"
+    )
+
 st.selectbox(
     "Customer example",
     ["Custom input", *EXAMPLE_TEXT],
@@ -87,9 +149,23 @@ problem = st.text_area(
 
 _, _, current_config_signature = _assessment_config()
 saved_signature = st.session_state.get("report_signature")
-if saved_signature and saved_signature != (problem, current_config_signature):
+current_signature = (problem, current_config_signature, knowledge_config_signature)
+if saved_signature and saved_signature != current_signature:
     _clear_assessment(clear_review=True)
     st.info("Input or provider settings changed. Assess again to refresh the report.")
+current_revision = knowledge_status.get("revision")
+saved_report = st.session_state.get("report")
+if (
+    saved_report is not None
+    and saved_report.knowledge_index_revision
+    and (
+        not knowledge_status.get("ready")
+        or not current_revision
+        or saved_report.knowledge_index_revision != current_revision
+    )
+):
+    _clear_assessment(clear_review=True)
+    st.info("Knowledge base changed. Assess again to refresh the report.")
 
 if st.button("Assess use case", type="primary"):
     _clear_assessment()
@@ -97,9 +173,18 @@ if st.button("Assess use case", type="primary"):
         st.error("Enter a customer problem or choose a synthetic example.")
     else:
         try:
-            st.session_state.report = assess_problem(problem)
+            if retriever is None:
+                raise ValueError("Knowledge base configuration is invalid.")
+            report = assess_problem(problem, retriever=retriever)
+            latest_revision = retriever.knowledge_status().get("revision")
+            if (
+                report.knowledge_index_revision
+                and report.knowledge_index_revision != latest_revision
+            ):
+                raise ValueError("Knowledge base changed during assessment. Run assessment again.")
+            st.session_state.report = report
             st.session_state.report_input = problem
-            st.session_state.report_signature = (problem, current_config_signature)
+            st.session_state.report_signature = current_signature
         except ValueError as exc:
             _clear_assessment()
             st.error(str(exc))
@@ -121,9 +206,20 @@ if report is not None:
         if st.button("Apply expert corrections"):
             _clear_assessment()
             try:
-                st.session_state.report = assess_use_case(pending)
+                if retriever is None:
+                    raise ValueError("Knowledge base configuration is invalid.")
+                report = assess_use_case(pending, retriever=retriever)
+                latest_revision = retriever.knowledge_status().get("revision")
+                if (
+                    report.knowledge_index_revision
+                    and report.knowledge_index_revision != latest_revision
+                ):
+                    raise ValueError(
+                        "Knowledge base changed during assessment. Run assessment again."
+                    )
+                st.session_state.report = report
                 st.session_state.report_input = problem
-                st.session_state.report_signature = (problem, current_config_signature)
+                st.session_state.report_signature = current_signature
             except ValueError as exc:
                 st.session_state.correction_error = str(exc)
             st.rerun()
@@ -171,57 +267,3 @@ if report is not None and st.session_state.get("report_input") == problem and no
                     st.info(message)
     with structured_tab:
         st.json(structured)
-
-st.divider()
-st.header("Document Q&A")
-st.caption("Local document retrieval; separate from spectroscopy assessment.")
-try:
-    rag_settings = RagSettings.from_env()
-    provider = st.selectbox(
-        "Document answer provider",
-        ["ollama", "openai"],
-        index=0 if rag_settings.provider == "ollama" else 1,
-        key="rag_provider",
-    )
-    from dataclasses import replace
-
-    rag_settings = replace(rag_settings, provider=provider)
-    if provider == "openai":
-        st.warning(
-            "API mode sends your question and retrieved excerpts to the configured endpoint."
-        )
-    index_path = Path(rag_settings.index)
-    revision = None
-    try:
-        metadata, _ = load_index(index_path)
-        revision = metadata["revision"]
-        st.caption(f"Index: {metadata['documents']} documents · {metadata['chunks']} chunks")
-    except ValueError as exc:
-        st.info(str(exc))
-    question = st.text_input("Question about your documents", key="rag_question")
-    signature = (
-        question,
-        rag_settings,
-        revision,
-        os.getenv("OPENAI_MODEL"),
-        os.getenv("OPENAI_BASE_URL"),
-    )
-    if st.button("Ask documents", key="rag_ask"):
-        st.session_state.pop("rag_result", None)
-        try:
-            st.session_state.rag_result = ask(question, index_path, rag_settings)
-            st.session_state.rag_signature = signature
-        except ValueError as exc:
-            st.error(str(exc))
-    result = st.session_state.get("rag_result")
-    if result is not None and st.session_state.get("rag_signature") == signature:
-        answer_markdown = render_answer(result)
-        st.markdown(answer_markdown)
-        st.download_button(
-            "Download document answer as Markdown",
-            answer_markdown,
-            file_name="spectro-ai-document-answer.md",
-            mime="text/markdown",
-        )
-except ValueError as exc:
-    st.error(str(exc))

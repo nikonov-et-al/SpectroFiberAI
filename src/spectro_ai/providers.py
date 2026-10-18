@@ -26,7 +26,6 @@ from spectro_ai.models import (
     TechniqueCandidate,
     ValidationDiagnostic,
 )
-from spectro_ai.rag_models import DocumentAnswer
 
 _OLLAMA_LOCK = Lock()
 
@@ -38,16 +37,22 @@ class RagSettings:
     model: str = "gemma4:12b-it-q4_K_M"
     embedding_model: str = "qwen3-embedding:0.6b"
     context: int = 4096
+    evidence_count: int = 8
     index: str = ".cache/rag/index.sqlite3"
 
     @classmethod
     def from_env(cls) -> RagSettings:
         try:
             context = int(os.getenv("SPECTRO_RAG_CONTEXT", "4096"))
+            evidence_count = int(os.getenv("SPECTRO_RAG_EVIDENCE_COUNT", "8"))
         except ValueError:
-            raise ProviderError("SPECTRO_RAG_CONTEXT must be an integer") from None
+            raise ProviderError(
+                "SPECTRO_RAG_CONTEXT and SPECTRO_RAG_EVIDENCE_COUNT must be integers"
+            ) from None
         if context < 1024:
             raise ProviderError("SPECTRO_RAG_CONTEXT must be at least 1024")
+        if evidence_count < 1:
+            raise ProviderError("SPECTRO_RAG_EVIDENCE_COUNT must be at least 1")
         provider = os.getenv("SPECTRO_RAG_PROVIDER", "ollama").strip().lower()
         if provider not in {"ollama", "openai"}:
             raise ProviderError("SPECTRO_RAG_PROVIDER must be ollama or openai")
@@ -57,6 +62,7 @@ class RagSettings:
             model=os.getenv("OLLAMA_MODEL", cls.model),
             embedding_model=os.getenv("OLLAMA_EMBED_MODEL", cls.embedding_model),
             context=context,
+            evidence_count=evidence_count,
             index=os.getenv("SPECTRO_RAG_INDEX", cls.index),
         )
 
@@ -459,67 +465,6 @@ def embed_texts(settings: RagSettings, texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def generate_document_answer(settings: RagSettings, system: str, user: str) -> DocumentAnswer:
-    if settings.provider not in {"ollama", "openai"}:
-        raise ProviderError("Unsupported document provider; use ollama or openai")
-    # UTF-8 bytes conservatively bound text tokens; leave room for framing and output.
-    if len((system + user).encode("utf-8")) + 768 > settings.context:
-        raise ProviderError(
-            "Context budget exceeded. Increase SPECTRO_RAG_CONTEXT or shorten input."
-        )
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    if settings.provider == "ollama":
-        result = ollama_request(
-            settings,
-            "/api/chat",
-            {
-                "model": settings.model,
-                "messages": messages,
-                "stream": False,
-                "format": DocumentAnswer.model_json_schema(),
-                "options": {"num_ctx": settings.context, "num_predict": 512},
-            },
-        )
-        if result.get("done_reason") == "length":
-            raise ProviderError("Model output exceeded token budget; shorten the question/context")
-        message = result.get("message")
-        if not isinstance(message, dict):
-            raise ProviderError("Ollama returned invalid chat output")
-        content = message.get("content", "")
-    else:
-        model, key = os.getenv("OPENAI_MODEL"), os.getenv("OPENAI_API_KEY")
-        if not model or not key:
-            raise ProviderError("Set OPENAI_MODEL and OPENAI_API_KEY for document Q&A")
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise ProviderError("Install API support: uv sync --extra rag --extra llm") from None
-        try:
-            with OpenAI(
-                api_key=key,
-                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                timeout=120,
-                max_retries=0,
-            ) as client:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    max_tokens=512,
-                )
-            if response.choices[0].finish_reason != "stop":
-                raise ValueError
-            content = response.choices[0].message.content or ""
-        except Exception:
-            raise ProviderError(
-                "API generation failed. Check endpoint, credentials, model and JSON-mode support."
-            ) from None
-    try:
-        return DocumentAnswer.model_validate_json(content)
-    except ValidationError, ValueError, TypeError:
-        raise ProviderError("Model returned invalid document-answer JSON") from None
-
-
 class ProviderError(ValueError):
     """A provider is unknown, incomplete, or deliberately unavailable."""
 
@@ -896,6 +841,7 @@ def _abstention_report(
     provider: str | None = None,
     evidence: list[RetrievedEvidence] | None = None,
     evidence_version: str | None = None,
+    knowledge_index_revision: str | None = None,
 ) -> AssessmentReport:
     report = abstention_report(
         use_case,
@@ -906,6 +852,7 @@ def _abstention_report(
         evidence_version=evidence_version,
     )
     report.assessment_method = method
+    report.knowledge_index_revision = knowledge_index_revision
     return report
 
 
@@ -1064,7 +1011,17 @@ def assess_use_case(
         )
     try:
         source = retriever or EvidenceRetriever()
-        retrieved, version = _verified_retrieval(source, source.search(use_case, limit=8))
+        retrieval_limit = getattr(getattr(source, "settings", None), "evidence_count", 8)
+        snapshot = getattr(source, "snapshot", None)
+        if snapshot is not None:
+            source = snapshot()
+        initial_metadata = source.index_metadata()
+        index_revision = str(
+            initial_metadata.get("revision") or initial_metadata["manifest_version"]
+        )
+        retrieved, version = _verified_retrieval(
+            source, source.search(use_case, limit=retrieval_limit)
+        )
         if not retrieved:
             return _abstention_report(
                 use_case,
@@ -1074,6 +1031,7 @@ def assess_use_case(
                 method="evidence_abstention",
                 provider=provider,
                 evidence_version=version,
+                knowledge_index_revision=index_revision,
             )
         selected_assessor = assessor or OllamaTechnicalAssessor()
         dropped_ids: list[str] = []
@@ -1092,6 +1050,7 @@ def assess_use_case(
                 method="evidence_abstention",
                 provider=provider,
                 evidence_version=version,
+                knowledge_index_revision=index_revision,
             )
             report.assessment_warnings.append(
                 f"Dropped {len(dropped_ids)} whole excerpts to preserve complete "
@@ -1289,6 +1248,7 @@ def assess_use_case(
             assessment_method=f"{provider}_grounded",
             assessment_provider=provider,
             evidence_set_version=version,
+            knowledge_index_revision=index_revision,
             retrieved_evidence=retrieved,
             report_version=f"grounded-{provider}-v1",
             assessment_warnings=warnings,
@@ -1301,10 +1261,14 @@ def assess_use_case(
 def assess_problem(
     text: str,
     extractor: UseCaseExtractor | None = None,
+    *,
+    retriever: EvidenceRetriever | None = None,
 ) -> AssessmentReport:
     provider = os.getenv("SPECTRO_AI_PROVIDER", "ollama").strip().lower()
     if provider == "baseline":
         raise ProviderError("The baseline provider was removed. Use ollama or openai.")
     if provider not in {"ollama", "openai"}:
         raise ProviderError(f"Unsupported provider {provider!r}. Use ollama or openai.")
-    return assess_use_case((extractor or OllamaUseCaseExtractor()).extract(text))
+    return assess_use_case(
+        (extractor or OllamaUseCaseExtractor()).extract(text), retriever=retriever
+    )

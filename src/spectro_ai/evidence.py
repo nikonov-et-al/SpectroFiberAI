@@ -9,9 +9,12 @@ import math
 import os
 import posixpath
 import re
-import tempfile
+import sqlite3
+import time
+import uuid
 import zipfile
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -23,7 +26,11 @@ from spectro_ai.models import CustomerUseCase, RetrievedEvidence, TechniqueKnowl
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST = _ROOT / "knowledge" / "sources.yaml"
-_INDEX = _ROOT / ".cache" / "evidence" / "index.json"
+_INDEX = _ROOT / ".cache" / "rag" / "index.sqlite3"
+_DOCUMENTS = _ROOT / "documents"
+_CHUNKING_VERSION = 3
+_CHUNK_SIZE = 1200
+_CHUNK_OVERLAP = 180
 _BANNED_FILES = {
     "afs_examples_and_reference.docx",
     "customer_scenarios_for_final_evaluation.txt",
@@ -119,22 +126,66 @@ def _safe_source_path(root: Path, filename: str) -> Path:
     return path
 
 
-def _split_text(text: str, maximum: int = 1500, overlap: int = 180) -> list[str]:
+def _split_text(text: str, maximum: int | None = None, overlap: int | None = None) -> list[str]:
+    maximum = maximum or int(os.getenv("SPECTRO_RAG_CHUNK_SIZE", _CHUNK_SIZE))
+    overlap = (
+        overlap
+        if overlap is not None
+        else int(os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP))
+    )
+    if maximum < 200 or overlap < 0 or overlap >= maximum:
+        raise ValueError("Chunk size must be >= 200 and overlap smaller than chunk size")
     clean = " ".join(text.split())
+    if len(clean) <= maximum:
+        return [clean] if clean else []
     chunks: list[str] = []
-    start = 0
-    while start < len(clean):
-        end = min(start + maximum, len(clean))
-        if end < len(clean):
-            boundary = clean.rfind(" ", start + maximum // 2, end)
-            if boundary > start:
-                end = boundary
-        excerpt = clean[start:end].strip()
-        if excerpt:
-            chunks.append(excerpt)
-        if end >= len(clean):
-            break
-        start = max(start + 1, end - overlap)
+    pending = ""
+    for sentence in re.split(r"(?<=[.!?])\s+|(?<=;)\s+", clean):
+        if not sentence:
+            continue
+        if len(sentence) > maximum:
+            if pending:
+                chunks.append(pending)
+                pending = ""
+            start = 0
+            while start < len(sentence):
+                end = min(start + maximum, len(sentence))
+                if end < len(sentence):
+                    boundary = sentence.rfind(" ", start + maximum // 2, end)
+                    if boundary > start:
+                        end = boundary
+                    else:
+                        boundary = sentence.find(" ", end)
+                        if boundary >= 0:
+                            end = boundary
+                        else:
+                            end = len(sentence)
+                chunks.append(sentence[start:end].strip())
+                if end == len(sentence):
+                    break
+                start = max(start + 1, end - overlap)
+                boundary = sentence.find(" ", start)
+                if boundary >= 0:
+                    start = boundary + 1
+            continue
+        combined = f"{pending} {sentence}".strip()
+        if pending and len(combined) > maximum:
+            chunks.append(pending)
+            available = max(0, maximum - len(sentence) - 1)
+            tail_words: list[str] = []
+            tail_length = 0
+            for word in reversed(pending.split()):
+                added_length = len(word) + bool(tail_words)
+                if tail_length + added_length > min(overlap, available):
+                    break
+                tail_words.insert(0, word)
+                tail_length += added_length
+            tail = " ".join(tail_words)
+            pending = f"{tail} {sentence}".strip()
+        else:
+            pending = combined
+    if pending:
+        chunks.append(pending)
     return chunks
 
 
@@ -144,6 +195,8 @@ def _pdf_blocks(path: Path) -> tuple[list[tuple[str, str]], list[str], list[str]
     except ImportError as exc:
         raise RuntimeError("PDF indexing needs the project 'rag' extra (pypdf)") from exc
     reader = PdfReader(str(path))
+    if getattr(reader, "is_encrypted", False):
+        raise ValueError(f"Encrypted PDF cannot be indexed: {path.name}")
     blocks: list[tuple[str, str]] = []
     empty_pages: list[str] = []
     poor_pages: list[str] = []
@@ -160,6 +213,10 @@ def _pdf_blocks(path: Path) -> tuple[list[tuple[str, str]], list[str], list[str]
                 f" (chunk {number_in_page}/{len(parts)})" if len(parts) > 1 else ""
             )
             blocks.append((locator, part))
+    if not blocks:
+        raise ValueError(
+            f"Scanned or empty PDF cannot be indexed: {path.name}; OCR is not supported"
+        )
     return blocks, empty_pages, poor_pages
 
 
@@ -176,6 +233,35 @@ def _txt_blocks(path: Path) -> list[tuple[str, str]]:
             blocks.append((f"lines {start + 1}-{stop}", part))
         if stop == len(lines):
             break
+    return blocks
+
+
+def _markdown_blocks(path: Path) -> list[tuple[str, str]]:
+    heading = "document"
+    paragraphs: list[str] = []
+    blocks: list[tuple[str, str]] = []
+    first_line = 1
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+
+    def flush(last_line: int) -> None:
+        text = "\n".join(paragraphs).strip()
+        if text:
+            for part in _split_text(f"{heading}\n{text}"):
+                blocks.append((f"section={heading}; lines {first_line}-{last_line}", part))
+        paragraphs.clear()
+
+    for number, line in enumerate(lines, 1):
+        if line.lstrip().startswith("#"):
+            flush(number - 1)
+            heading = line.lstrip("# ").strip() or "document"
+            first_line = number
+        elif line.strip():
+            if not paragraphs:
+                first_line = number
+            paragraphs.append(line.strip())
+        elif paragraphs:
+            flush(number - 1)
+    flush(len(lines))
     return blocks
 
 
@@ -302,31 +388,111 @@ def _extract(path: Path) -> tuple[list[tuple[str, str]], list[str], list[str]]:
 def reindex_sources(
     manifest_path: Path | None = None, index_path: Path | None = None
 ) -> dict[str, Any]:
-    """Rebuild full index in memory, then atomically replace prior index."""
-    manifest_path = manifest_path or _MANIFEST
-    index_path = index_path or _INDEX
+    """Index manifest sources in the same SQLite format used by assessment retrieval."""
+    return _update_index(
+        manifest_path=manifest_path or _MANIFEST,
+        index_path=index_path or _INDEX,
+        documents_path=None,
+        semantic=False,
+    )
+
+
+def _load_old_index(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    if not path.exists():
+        return {}, {}
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            metadata = json.loads(db.execute("SELECT value FROM metadata").fetchone()[0])
+            rows = db.execute("SELECT id, chunk, vector FROM chunks").fetchall()
+        return metadata, {
+            row[0]: {"chunk": json.loads(row[1]), "vector": json.loads(row[2])} for row in rows
+        }
+    except sqlite3.Error, ValueError, TypeError, IndexError, json.JSONDecodeError:
+        raise ValueError("Knowledge index is corrupt or incompatible; rebuild it") from None
+
+
+def _update_index(
+    *,
+    manifest_path: Path,
+    index_path: Path,
+    documents_path: Path | None,
+    semantic: bool,
+    settings: Any = None,
+    force_rebuild: bool = False,
+) -> dict[str, Any]:
+    from spectro_ai import providers
+
     root, sources = _load_manifest(manifest_path)
+    if documents_path and documents_path.is_dir():
+        for path in sorted(documents_path.rglob("*")):
+            if not path.is_file() or path.suffix.casefold() not in {".pdf", ".md", ".txt"}:
+                continue
+            if path.is_symlink() or not path.resolve().is_relative_to(documents_path.resolve()):
+                raise ValueError("Document links outside the documents directory are not supported")
+            relative = path.relative_to(documents_path).as_posix()
+            if path.name.casefold() in _BANNED_FILES or any(
+                tag in relative.casefold() for tag in _BANNED_TAGS
+            ):
+                continue
+            source_id = "D" + _sha256(relative.encode())[:7].upper()
+            sources.append(
+                {
+                    "source_id": source_id,
+                    "filename": relative,
+                    "_root": documents_path,
+                    "title": path.stem,
+                    "source_type": "customer_document",
+                    "scope": "unreviewed_document",
+                    "review_status": "needs_source_review",
+                }
+            )
+    try:
+        old_meta, old_chunks = _load_old_index(index_path)
+    except ValueError:
+        old_meta, old_chunks = {}, {}
+    if force_rebuild:
+        old_meta, old_chunks = {}, {}
+    if old_meta.get("schema_version") != 2:
+        old_chunks = {}
+    settings = settings or providers.RagSettings.from_env()
+    chunk_size = int(os.getenv("SPECTRO_RAG_CHUNK_SIZE", _CHUNK_SIZE))
+    chunk_overlap = int(os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP))
+    _split_text("config validation", chunk_size, chunk_overlap)
+    identity = providers.embedding_identity(settings) if semantic else "bm25-only"
+    if (
+        old_meta
+        and semantic
+        and (
+            old_meta.get("embedding_identity") != identity
+            or old_meta.get("chunking_version") != _CHUNKING_VERSION
+            or old_meta.get("chunk_size") != chunk_size
+            or old_meta.get("chunk_overlap") != chunk_overlap
+        )
+    ):
+        old_chunks = {}
     files: list[dict[str, Any]] = []
     missing: list[dict[str, str]] = []
     chunks: dict[str, dict[str, Any]] = {}
-    extraction_cache: dict[tuple[str, str], tuple[list[tuple[str, str]], list[str], list[str]]] = {}
     for source in sources:
         filename = str(source["filename"])
-        path = _safe_source_path(root, filename)
+        source_root = Path(source.get("_root", root))
+        path = _safe_source_path(source_root, filename)
         source_id = str(source["source_id"])
         if not path.is_file():
             missing.append({"source_id": source_id, "filename": filename, "status": "missing"})
             continue
-        content = path.read_bytes()
-        version = _sha256(content)
-        cache_key = (version, path.suffix.casefold())
-        if cache_key not in extraction_cache:
-            extraction_cache[cache_key] = _extract(path)
-        blocks, empty_pages, poor_pages = extraction_cache[cache_key]
+        try:
+            content = path.read_bytes()
+            version = _sha256(content)
+            if path.suffix.casefold() == ".md":
+                blocks = _markdown_blocks(path)
+                empty_pages, poor_pages = [], []
+            else:
+                blocks, empty_pages, poor_pages = _extract(path)
+        except Exception as exc:
+            raise ValueError(f"Cannot extract source {filename}: {exc}") from exc
         page_numbers = [
-            int(match.group(1))
-            for locator, _ in blocks
-            if (match := re.match(r"p\.(\d+)", locator))
+            int(m.group(1)) for locator, _ in blocks if (m := re.match(r"p\.(\d+)", locator))
         ] + [int(value.split(".", 1)[1]) for value in empty_pages]
         file_record = {
             "source_id": source_id,
@@ -344,35 +510,37 @@ def reindex_sources(
             "chunk_count": len(blocks),
         }
         files.append(file_record)
-        overrides = source.get("page_review", {})
-        for chunk_number, (locator, excerpt) in enumerate(blocks, 1):
+        review_overrides = source.get("page_review", {})
+        for number, (locator, excerpt) in enumerate(blocks, 1):
+            content_hash = _sha256(excerpt.encode())
+            chunk_id = _sha256(
+                f"{content_hash}:{_CHUNKING_VERSION}:{chunk_size}:{chunk_overlap}".encode()
+            )
+            item = chunks.setdefault(
+                content_hash,
+                {
+                    "content_sha256": content_hash,
+                    "text": excerpt,
+                    "provenance": [],
+                    "chunk_id": chunk_id,
+                },
+            )
+            evidence_id = f"{source_id}-{path.stem}-{version[:12]}-{number:04d}"
             page_match = re.match(r"p\.(\d+)", locator)
             review = (
-                overrides.get(page_match.group(1), file_record["review_status"])
+                review_overrides.get(page_match.group(1), file_record["review_status"])
                 if page_match
                 else file_record["review_status"]
             )
             if page_match and f"p.{page_match.group(1)}" in poor_pages:
                 review = f"{review}; poor_extraction_needs_manual_review"
-            content_hash = _sha256(excerpt.encode("utf-8"))
-            item = chunks.setdefault(
-                content_hash, {"content_sha256": content_hash, "text": excerpt, "provenance": []}
-            )
-            evidence_id = f"{source_id}-{path.stem}-{version[:12]}-{chunk_number:04d}"
             provenance = {
                 "evidence_id": evidence_id,
                 "source_id": source_id,
                 "document_version": version,
                 "page_or_section": locator,
                 "review_status": str(review),
-                "source_scope": "; ".join(
-                    dict.fromkeys(
-                        (
-                            str(source.get("source_type", "technical_reference")),
-                            str(source.get("scope", "technical")),
-                        )
-                    )
-                ),
+                "source_scope": "; ".join((file_record["source_type"], file_record["scope"])),
                 "title": file_record["title"],
                 "filename": filename,
                 "related_source": source.get("related_source"),
@@ -380,38 +548,119 @@ def reindex_sources(
             }
             if provenance not in item["provenance"]:
                 item["provenance"].append(provenance)
-
-    result = {
-        "schema_version": 1,
-        "manifest_version": _sha256(manifest_path.read_bytes()),
+    pending = [
+        chunk
+        for chunk in chunks.values()
+        if chunk["chunk_id"] not in old_chunks
+        or "bm25-only" in {identity, old_meta.get("embedding_identity")}
+        and semantic
+    ]
+    vectors: dict[str, list[float]] = {}
+    for key, value in old_chunks.items():
+        vectors[key] = value["vector"]
+    if semantic:
+        for start in range(0, len(pending), 16):
+            batch = pending[start : start + 16]
+            embedded = providers.embed_texts(settings, [c["text"] for c in batch])
+            if len(embedded) != len(batch) or any(
+                not v
+                or any(
+                    isinstance(x, bool)
+                    or not isinstance(x, (int, float))
+                    or not math.isfinite(float(x))
+                    for x in v
+                )
+                or not math.hypot(*v)
+                for v in embedded
+            ):
+                raise ValueError("Ollama returned invalid chunk embeddings")
+            expected_dimension = len(next(iter(vectors.values()))) if vectors else len(embedded[0])
+            if any(len(vector) != expected_dimension for vector in embedded):
+                raise ValueError("Ollama returned inconsistent embedding dimensions")
+            vectors.update(
+                (chunk["chunk_id"], vector) for chunk, vector in zip(batch, embedded, strict=True)
+            )
+    else:
+        vectors = {chunk["chunk_id"]: [] for chunk in chunks.values()}
+    manifest_version = _sha256(manifest_path.read_bytes())
+    metadata = {
+        "schema_version": 2,
+        "manifest_version": manifest_version,
         "files": files,
         "missing_sources": missing,
-        "chunks": list(chunks.values()),
+        "embedding_model": settings.embedding_model if semantic else None,
+        "embedding_identity": identity,
+        "embedding_dimension": len(next(iter(vectors.values()))) if vectors and semantic else 0,
+        "chunking_version": _CHUNKING_VERSION,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "revision": uuid.uuid4().hex,
+        "indexed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "chunks": len(chunks),
+        "documents": len(files),
     }
-    encoded = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
+    staging = index_path.with_name(index_path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        with tempfile.NamedTemporaryFile(
-            dir=index_path.parent, prefix=f"{index_path.name}.", delete=False
-        ) as temp:
-            temp.write(encoded)
-            temp.flush()
-            os.fsync(temp.fileno())
-            temp_name = temp.name
-        os.replace(temp_name, index_path)
+        with closing(sqlite3.connect(staging)) as db, db:
+            db.execute("CREATE TABLE metadata (value TEXT NOT NULL)")
+            db.execute(
+                "CREATE TABLE chunks (id TEXT PRIMARY KEY, chunk TEXT NOT NULL, "
+                "vector TEXT NOT NULL)"
+            )
+            db.execute("INSERT INTO metadata VALUES (?)", (json.dumps(metadata),))
+            db.executemany(
+                "INSERT INTO chunks VALUES (?, ?, ?)",
+                [
+                    (c["chunk_id"], json.dumps(c), json.dumps(vectors[c["chunk_id"]]))
+                    for c in chunks.values()
+                ],
+            )
+            db.commit()
+        _validate_database(staging)
+        os.replace(staging, index_path)
     except Exception:
-        if temp_name and os.path.exists(temp_name):
-            os.unlink(temp_name)
+        staging.unlink(missing_ok=True)
         raise
     return {
         "index_path": str(index_path),
         "files_indexed": len(files),
         "chunks": len(chunks),
+        "new_embeddings": len(pending) if semantic else 0,
+        "reused_embeddings": len(chunks) - len(pending) if semantic else 0,
         "missing_sources": missing,
-        "empty_pdf_pages": sum(len(item["empty_pages"]) for item in files),
-        "poor_extraction_pages": sum(len(item["poor_extraction_pages"]) for item in files),
+        "empty_pdf_pages": sum(len(f["empty_pages"]) for f in files),
+        "poor_extraction_pages": sum(len(f["poor_extraction_pages"]) for f in files),
+        **metadata,
     }
+
+
+def _validate_database(
+    path: Path, loaded: tuple[dict[str, Any], dict[str, dict[str, Any]]] | None = None
+) -> None:
+    meta, chunks = loaded or _load_old_index(path)
+    if meta.get("schema_version") != 2 or meta.get("chunks") != len(chunks):
+        raise ValueError("Staged knowledge index failed validation")
+    dimension = meta.get("embedding_dimension")
+    for chunk in chunks.values():
+        vector = chunk["vector"]
+        if meta.get("embedding_model") is None:
+            if vector:
+                raise ValueError("Staged BM25 index contains unexpected vectors")
+            continue
+        if (
+            not isinstance(dimension, int)
+            or len(vector) != dimension
+            or not vector
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in vector
+            )
+            or math.hypot(*vector) == 0
+        ):
+            raise ValueError("Staged knowledge index contains invalid embeddings")
 
 
 def _tokens(text: str) -> list[str]:
@@ -423,14 +672,54 @@ def _query_text(use_case: CustomerUseCase) -> str:
     for name in CustomerUseCase.FACT_FIELDS:
         value = getattr(use_case, name)
         if value:
-            values.append(value)
+            values.append(f"{name.replace('_', ' ')}: {value}")
     for name in ("source_text", "customer_preferences", "strict_requirements"):
         value = getattr(use_case, name)
         if isinstance(value, str) and value:
-            values.append(value)
+            values.append(f"{name.replace('_', ' ')}: {value}")
         elif isinstance(value, list):
-            values.extend(value)
+            values.extend(f"{name.replace('_', ' ')}: {item}" for item in value)
     return " ".join(values)
+
+
+def _query_groups(use_case: CustomerUseCase, claim: str | None = None) -> list[str]:
+    buckets = (
+        (
+            "application and sample",
+            ("industry", "process", "sample_matrix", "composition", "physical_state"),
+        ),
+        (
+            "measurement objective",
+            ("measurement_objective", "target_analyte_or_property", "concentration_range"),
+        ),
+        (
+            "measurement setup",
+            ("measurement_location", "deployment_mode", "measurement_frequency", "desired_stage"),
+        ),
+    )
+    grouped = {name for _, fields in buckets for name in fields}
+    buckets += (
+        (
+            "technical limitations",
+            tuple(name for name in CustomerUseCase.FACT_FIELDS if name not in grouped),
+        ),
+    )
+    queries = [use_case.source_text] if use_case.source_text else []
+    for label, fields in buckets:
+        values = [
+            f"{name.replace('_', ' ')}: {getattr(use_case, name)}"
+            for name in fields
+            if getattr(use_case, name)
+        ]
+        if values:
+            queries.append(f"{label}: " + "; ".join(values))
+    for name in ("customer_preferences", "strict_requirements"):
+        values = getattr(use_case, name)
+        if values:
+            queries.append(f"{name.replace('_', ' ')}: " + "; ".join(values))
+    if claim:
+        queries.append(f"assessment claim: {claim}")
+    return list(dict.fromkeys(query for query in queries if query and query.strip()))
 
 
 def _expanded_query(text: str) -> list[str]:
@@ -443,24 +732,59 @@ def _expanded_query(text: str) -> list[str]:
 
 
 class EvidenceRetriever:
-    """Local lexical BM25 search over indexed, source-cited excerpts."""
+    """Persistent SQLite BM25 and cosine retrieval with source provenance."""
 
-    def __init__(self, index_path: Path | None = None, manifest_path: Path | None = None) -> None:
-        self.index_path = index_path or _INDEX
+    def __init__(
+        self,
+        index_path: Path | None = None,
+        manifest_path: Path | None = None,
+        settings: Any = None,
+        documents_path: Path | None = None,
+        mode: str = "hybrid",
+        bm25_candidates: int = 30,
+        semantic_candidates: int = 30,
+        context_budget: int = 12000,
+        rrf_k: int = 60,
+    ) -> None:
+        from spectro_ai.providers import RagSettings
+
+        self.settings = settings or RagSettings.from_env()
+        self.index_path = index_path or Path(self.settings.index)
         self.manifest_path = manifest_path or _MANIFEST
+        self.documents_path = documents_path if documents_path is not None else _DOCUMENTS
+        self.mode = mode
+        self.bm25_candidates, self.semantic_candidates = bm25_candidates, semantic_candidates
+        self.context_budget, self.rrf_k = context_budget, rrf_k
+        if mode not in {"hybrid", "bm25"}:
+            raise ValueError("mode must be 'hybrid' or 'bm25'")
+        if bm25_candidates < 1 or semantic_candidates < 1 or context_budget < 1 or rrf_k < 0:
+            raise ValueError(
+                "Candidate counts and context budget must be positive; rrf_k nonnegative"
+            )
 
     def index_metadata(self) -> dict[str, Any]:
         """Return validated source/version/page metadata for citation checks."""
         try:
-            index = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            index, rows = _load_old_index(self.index_path)
+            _validate_database(self.index_path, (index, rows))
+            index["chunks"] = [row["chunk"] for row in rows.values()]
+            index["vectors"] = {key: row["vector"] for key, row in rows.items()}
+        except (OSError, ValueError) as exc:
             raise ValueError(f"Cannot read evidence index {self.index_path}: {exc}") from exc
-        if not isinstance(index, dict) or index.get("schema_version") != 1:
-            raise ValueError("Evidence index schema is unsupported or corrupt; run reindex")
+        if index.get("schema_version") != 2 or index.get("chunking_version") != _CHUNKING_VERSION:
+            raise ValueError(
+                "Knowledge index schema is unsupported or stale; run Update Knowledge Base"
+            )
+        if index.get("chunk_size") != int(
+            os.getenv("SPECTRO_RAG_CHUNK_SIZE", _CHUNK_SIZE)
+        ) or index.get("chunk_overlap") != int(
+            os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP)
+        ):
+            raise ValueError("Knowledge index chunking settings changed; run Update Knowledge Base")
         if not all(
             isinstance(index.get(key), list) for key in ("files", "missing_sources", "chunks")
         ):
-            raise ValueError("Evidence index collections are corrupt; run reindex")
+            raise ValueError("Knowledge index collections are corrupt; run Update Knowledge Base")
         try:
             manifest_version = _sha256(self.manifest_path.read_bytes())
         except OSError as exc:
@@ -468,7 +792,9 @@ class EvidenceRetriever:
                 f"Cannot validate source manifest {self.manifest_path}: {exc}"
             ) from exc
         if index.get("manifest_version") != manifest_version:
-            raise ValueError("Evidence index is stale for the current manifest; run reindex")
+            raise ValueError(
+                "Knowledge index is stale for the current manifest; run Update Knowledge Base"
+            )
         try:
             root, sources = _load_manifest(self.manifest_path)
         except (OSError, ValueError) as exc:
@@ -551,21 +877,55 @@ class EvidenceRetriever:
         return index
 
     def search(self, use_case: CustomerUseCase, limit: int = 8) -> list[RetrievedEvidence]:
-        return self._search(_query_text(use_case), limit)
+        return self._search_many(_query_groups(use_case), limit)
 
     def search_claim(
         self, use_case: CustomerUseCase, claim: str, limit: int = 4
     ) -> list[RetrievedEvidence]:
         """Retrieve source excerpts relevant to one assessment claim."""
-        return self._search(claim, limit)
+        return self._search_many(_query_groups(use_case, claim), limit)
 
-    def _search(self, query_text: str, limit: int) -> list[RetrievedEvidence]:
+    def _search_many(
+        self, queries: list[str], limit: int, pinned_index: dict[str, Any] | None = None
+    ) -> list[RetrievedEvidence]:
         if limit < 1:
             raise ValueError("limit must be at least 1")
-        index = self.index_metadata()
+        index = pinned_index or self.index_metadata()
+        if self.mode == "hybrid":
+            from spectro_ai import providers
+
+            if index.get("embedding_model") != self.settings.embedding_model:
+                raise ValueError("Embedding model changed; run Update Knowledge Base")
+            if providers.embedding_identity(self.settings) != index.get("embedding_identity"):
+                raise ValueError("Embedding model revision changed; run Update Knowledge Base")
+        found: dict[str, tuple[float, RetrievedEvidence]] = {}
+        candidate_limit = max(self.bm25_candidates, self.semantic_candidates, limit)
+        for query in queries:
+            for rank, hit in enumerate(self._search(query, candidate_limit, index), 1):
+                score, _ = found.get(hit.evidence_id, (0.0, hit))
+                found[hit.evidence_id] = (score + 1 / (self.rrf_k + rank), hit)
+        ranked = sorted(found.values(), key=lambda item: (-item[0], item[1].evidence_id))
+        selected: list[RetrievedEvidence] = []
+        used_bytes = 0
+        for score, hit in ranked:
+            cost = len(hit.excerpt.encode("utf-8"))
+            if used_bytes + cost > self.context_budget:
+                continue
+            selected.append(hit.model_copy(update={"retrieval_score": score}))
+            used_bytes += cost
+            if len(selected) == limit:
+                break
+        return selected
+
+    def _search(
+        self, query_text: str, limit: int, pinned_index: dict[str, Any] | None = None
+    ) -> list[RetrievedEvidence]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        index = pinned_index or self.index_metadata()
         chunks = index.get("chunks", [])
         query = Counter(_expanded_query(query_text))
-        if not query or not chunks:
+        if not chunks:
             return []
         corpus = [Counter(_tokens(chunk["text"])) for chunk in chunks]
         lengths = [sum(counts.values()) for counts in corpus]
@@ -589,24 +949,174 @@ class EvidenceRetriever:
             if score > 0:
                 ranked.append((score, index_number))
         ranked.sort(key=lambda item: (-item[0], chunks[item[1]]["content_sha256"]))
+        bm25 = [number for _, number in ranked[: self.bm25_candidates]]
+        semantic: list[int] = []
+        if self.mode == "hybrid":
+            from spectro_ai import providers
+
+            query_vector = providers.embed_texts(self.settings, [query_text])[0]
+            valid_query = bool(query_vector) and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for value in query_vector
+            )
+            query_norm = math.hypot(*query_vector) if valid_query else 0
+            if not query_norm:
+                raise ValueError("Ollama returned invalid query embedding")
+            if len(query_vector) != index.get("embedding_dimension"):
+                raise ValueError("Query embedding dimension does not match knowledge index")
+            similarities = []
+            for number, chunk in enumerate(chunks):
+                vector = index["vectors"].get(chunk["chunk_id"], [])
+                if len(vector) != len(query_vector) or not vector:
+                    raise ValueError("Knowledge index embedding dimensions are incompatible")
+                similarity = sum(a * b for a, b in zip(query_vector, vector, strict=True)) / (
+                    query_norm * math.hypot(*vector)
+                )
+                similarities.append((similarity, number))
+            similarities.sort(key=lambda item: (-item[0], chunks[item[1]]["content_sha256"]))
+            semantic = [number for _, number in similarities[: self.semantic_candidates]]
+        fused: dict[int, float] = {}
+        for rank, number in enumerate(bm25, 1):
+            fused[number] = fused.get(number, 0) + 1 / (self.rrf_k + rank)
+        for rank, number in enumerate(semantic, 1):
+            fused[number] = fused.get(number, 0) + 1 / (self.rrf_k + rank)
+        ordered = sorted(fused, key=lambda n: (-fused[n], chunks[n]["content_sha256"]))
         output: list[RetrievedEvidence] = []
-        for score, chunk_number in ranked:
-            for provenance in chunks[chunk_number]["provenance"]:
+        used_bytes = 0
+        for chunk_number in ordered:
+            excerpt = chunks[chunk_number]["text"]
+            cost = len(excerpt.encode("utf-8"))
+            if used_bytes + cost > self.context_budget:
+                continue
+            for provenance in chunks[chunk_number]["provenance"][:1]:
                 output.append(
                     RetrievedEvidence(
                         evidence_id=provenance["evidence_id"],
                         source_id=provenance["source_id"],
                         document_version=provenance["document_version"],
                         page_or_section=provenance["page_or_section"],
-                        excerpt=chunks[chunk_number]["text"],
+                        excerpt=excerpt,
                         review_status=provenance["review_status"],
-                        retrieval_score=score,
+                        retrieval_score=fused[chunk_number],
                         source_scope=provenance["source_scope"],
                     )
                 )
-                if len(output) >= limit:
-                    return output
+                used_bytes += cost
+                break
+            if len(output) >= limit:
+                return output
         return output
+
+    def snapshot(self) -> _PinnedEvidenceRetriever:
+        return _PinnedEvidenceRetriever(self, self.index_metadata())
+
+    def update_knowledge_base(self, force_rebuild: bool = False) -> dict[str, Any]:
+        try:
+            before, _ = _load_old_index(self.index_path)
+        except ValueError:
+            before = {}
+        result = _update_index(
+            manifest_path=self.manifest_path,
+            index_path=self.index_path,
+            documents_path=self.documents_path,
+            semantic=True,
+            settings=self.settings,
+            force_rebuild=force_rebuild,
+        )
+        previous = {item["filename"]: item for item in before.get("files", [])}
+        current = {item["filename"]: item for item in result["files"]}
+        added = sum(name not in previous for name in current)
+        changed = sum(
+            name in previous and previous[name]["document_version"] != item["document_version"]
+            for name, item in current.items()
+        )
+        unchanged = sum(
+            name in previous and previous[name]["document_version"] == item["document_version"]
+            for name, item in current.items()
+        )
+        removed = sum(name not in current for name in previous)
+        result["documents"] = {
+            "new": added,
+            "updated": changed,
+            "removed": removed,
+            "unchanged": unchanged,
+        }
+        result["embeddings"] = {
+            "new": result["new_embeddings"],
+            "reused": result["reused_embeddings"],
+        }
+        return result
+
+    def knowledge_status(self) -> dict[str, Any]:
+        try:
+            meta = self.index_metadata()
+            mode = "hybrid" if meta["embedding_model"] else "bm25"
+            if self.mode == "hybrid" and mode != "hybrid":
+                return {
+                    "ready": False,
+                    "documents": meta["documents"],
+                    "chunks": len(meta["chunks"]),
+                    "embedding_model": meta["embedding_model"],
+                    "mode": mode,
+                    "indexed_at": meta["indexed_at"],
+                    "revision": meta["revision"],
+                    "error": (
+                        "Knowledge base has no embeddings. Click Update Knowledge Base "
+                        "to enable hybrid retrieval."
+                    ),
+                }
+            if self.mode == "hybrid" and meta["embedding_model"] != self.settings.embedding_model:
+                return {
+                    "ready": False,
+                    "documents": meta["documents"],
+                    "chunks": len(meta["chunks"]),
+                    "embedding_model": meta["embedding_model"],
+                    "mode": mode,
+                    "indexed_at": meta["indexed_at"],
+                    "revision": meta["revision"],
+                    "error": (
+                        "Embedding model changed. Click Update Knowledge Base "
+                        "to rebuild embeddings."
+                    ),
+                }
+            return {
+                "ready": True,
+                "documents": meta["documents"],
+                "chunks": len(meta["chunks"]),
+                "embedding_model": meta["embedding_model"],
+                "mode": mode,
+                "indexed_at": meta["indexed_at"],
+                "revision": meta["revision"],
+                "error": None,
+            }
+        except (OSError, ValueError) as exc:
+            return {
+                "ready": False,
+                "documents": 0,
+                "chunks": 0,
+                "embedding_model": self.settings.embedding_model,
+                "indexed_at": None,
+                "revision": None,
+                "error": str(exc),
+            }
+
+
+class _PinnedEvidenceRetriever:
+    def __init__(self, retriever: EvidenceRetriever, metadata: dict[str, Any]) -> None:
+        self.retriever, self.metadata = retriever, metadata
+
+    def index_metadata(self) -> dict[str, Any]:
+        return self.metadata
+
+    def search(self, use_case: CustomerUseCase, limit: int = 8) -> list[RetrievedEvidence]:
+        return self.retriever._search_many(_query_groups(use_case), limit, self.metadata)
+
+    def search_claim(
+        self, use_case: CustomerUseCase, claim: str, limit: int = 4
+    ) -> list[RetrievedEvidence]:
+        return self.retriever._search_many(_query_groups(use_case, claim), limit, self.metadata)
 
 
 class EvidenceKnowledgeSource(KnowledgeSource):
@@ -626,9 +1136,17 @@ def main() -> None:
     reindex_parser = subparsers.add_parser("reindex", help="atomically rebuild local source index")
     reindex_parser.add_argument("--manifest", type=Path, default=_MANIFEST)
     reindex_parser.add_argument("--index", type=Path, default=_INDEX)
+    reindex_parser.add_argument("--documents", type=Path, default=_DOCUMENTS)
+    reindex_parser.add_argument("--bm25", action="store_true", help="explicit lexical-only index")
     args = parser.parse_args()
     if args.command == "reindex":
-        print(json.dumps(reindex_sources(args.manifest, args.index), ensure_ascii=False, indent=2))
+        if args.bm25:
+            result = reindex_sources(args.manifest, args.index)
+        else:
+            result = EvidenceRetriever(
+                args.index, args.manifest, documents_path=args.documents
+            ).update_knowledge_base()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

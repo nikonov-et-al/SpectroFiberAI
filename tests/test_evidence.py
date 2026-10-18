@@ -1,13 +1,39 @@
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from types import ModuleType
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
-from spectro_ai.evidence import EvidenceKnowledgeSource, EvidenceRetriever, reindex_sources
+from spectro_ai.evidence import (
+    EvidenceKnowledgeSource,
+    EvidenceRetriever,
+    _split_text,
+    reindex_sources,
+)
 from spectro_ai.models import CustomerUseCase
+
+
+def _read_index(path: Path) -> dict:
+    with closing(sqlite3.connect(path)) as db:
+        metadata = json.loads(db.execute("SELECT value FROM metadata").fetchone()[0])
+        metadata["chunks"] = [json.loads(row[0]) for row in db.execute("SELECT chunk FROM chunks")]
+    return metadata
+
+
+def _write_index(path: Path, index: dict) -> None:
+    metadata = {key: value for key, value in index.items() if key != "chunks"}
+    metadata["chunks"] = len(index["chunks"])
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE metadata SET value = ?", (json.dumps(metadata),))
+        for chunk in index["chunks"]:
+            db.execute(
+                "UPDATE chunks SET chunk = ? WHERE id = ?", (json.dumps(chunk), chunk["chunk_id"])
+            )
+        db.commit()
 
 
 def _manifest(root: Path, entries: list[dict]) -> Path:
@@ -72,13 +98,13 @@ def test_reindex_tracks_page_lines_and_worksheet_rows(tmp_path: Path) -> None:
     index_path = root / "index.json"
 
     result = reindex_sources(manifest, index_path)
-    chunks = json.loads(index_path.read_text(encoding="utf-8"))["chunks"]
+    chunks = _read_index(index_path)["chunks"]
     locators = {p["page_or_section"] for chunk in chunks for p in chunk["provenance"]}
 
     assert result["files_indexed"] == 2
     assert "lines 1-2" in locators
     assert "worksheet=methods rows=1-2" in locators
-    retrieved = EvidenceRetriever(index_path, manifest).search(
+    retrieved = EvidenceRetriever(index_path, manifest, mode="bm25").search(
         CustomerUseCase(source_text="near infrared ATR spectroscopy"), limit=3
     )
     assert retrieved
@@ -94,7 +120,7 @@ def test_allowlisted_docx_indexes_sections_not_evaluation_material(tmp_path: Pat
     index_path = root / "index.json"
 
     reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
 
     assert {p["page_or_section"] for c in index["chunks"] for p in c["provenance"]} == {
         "section=Methods"
@@ -126,7 +152,7 @@ def test_pdf_pages_cite_original_page_and_empty_pages_are_visible(
     index_path = root / "index.json"
 
     result = reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
 
     assert result["empty_pdf_pages"] == 1
     assert result["poor_extraction_pages"] == 2
@@ -137,17 +163,17 @@ def test_pdf_pages_cite_original_page_and_empty_pages_are_visible(
     assert index["chunks"][0]["provenance"][0]["review_status"] == (
         "needs_visual_review; poor_extraction_needs_manual_review"
     )
-    retriever = EvidenceRetriever(index_path, manifest)
+    retriever = EvidenceRetriever(index_path, manifest, mode="bm25")
     index["chunks"][0]["provenance"][0]["page_or_section"] = "p.0"
-    index_path.write_text(json.dumps(index), encoding="utf-8")
+    _write_index(index_path, index)
     with pytest.raises(ValueError, match="outside source pages"):
         retriever.index_metadata()
 
     reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
     first_id = index["chunks"][0]["provenance"][0]["evidence_id"]
     index["chunks"][1]["provenance"][0]["evidence_id"] = first_id
-    index_path.write_text(json.dumps(index), encoding="utf-8")
+    _write_index(index_path, index)
     with pytest.raises(ValueError, match="duplicated"):
         retriever.index_metadata()
 
@@ -162,7 +188,7 @@ def test_identical_content_deduplicates_but_keeps_both_provenances(tmp_path: Pat
     index_path = root / "index.json"
 
     reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
 
     assert len(index["chunks"]) == 1
     assert {item["source_id"] for item in index["chunks"][0]["provenance"]} == {"S01", "S02"}
@@ -180,10 +206,10 @@ def test_changed_file_replaces_version_and_missing_source_is_reported(tmp_path: 
     index_path = root / "index.json"
 
     first = reindex_sources(manifest, index_path)
-    old_version = json.loads(index_path.read_text(encoding="utf-8"))["files"][0]["document_version"]
+    old_version = _read_index(index_path)["files"][0]["document_version"]
     source.write_text("NIR milk powder", encoding="utf-8")
     second = reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
 
     assert first["missing_sources"] == [
         {"source_id": "S02", "filename": "not-yet-supplied.pdf", "status": "missing"}
@@ -231,7 +257,7 @@ def test_manifest_addition_works_and_fixture_or_evaluation_entries_are_excluded(
     index_path = root / "index.json"
 
     result = reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
 
     assert result["files_indexed"] == 1
     assert [item["filename"] for item in index["files"]] == ["new-reference.txt"]
@@ -254,15 +280,15 @@ def test_search_rejects_stale_or_corrupt_index(tmp_path: Path) -> None:
     manifest = _manifest(root, [_source("S01", "source.txt")])
     index_path = root / "index.json"
     reindex_sources(manifest, index_path)
-    retriever = EvidenceRetriever(index_path, manifest)
+    retriever = EvidenceRetriever(index_path, manifest, mode="bm25")
     assert retriever.index_metadata()["files"][0]["document_version"]
 
     source.write_text("changed source", encoding="utf-8")
     with pytest.raises(ValueError, match="stale"):
         retriever.search(CustomerUseCase(source_text="water"))
 
-    index_path.write_text('{"schema_version": 99}', encoding="utf-8")
-    with pytest.raises(ValueError, match="schema"):
+    index_path.write_bytes(b"not sqlite")
+    with pytest.raises(ValueError, match="corrupt"):
         retriever.search(CustomerUseCase(source_text="water"))
 
 
@@ -280,7 +306,7 @@ def test_claim_search_finds_new_document_and_keeps_citation_provenance(tmp_path:
     )
     index_path = root / "index.json"
     reindex_sources(manifest, index_path)
-    retriever = EvidenceRetriever(index_path, manifest)
+    retriever = EvidenceRetriever(index_path, manifest, mode="bm25")
     use_case = CustomerUseCase(source_text="spectroscopy process monitoring")
 
     results = retriever.search_claim(use_case, "Raman fluorescence background")
@@ -300,9 +326,9 @@ def test_claim_search_rejects_invalid_citation_provenance(tmp_path: Path) -> Non
     manifest = _manifest(root, [_source("S01", "source.txt")])
     index_path = root / "index.json"
     reindex_sources(manifest, index_path)
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = _read_index(index_path)
     index["chunks"][0]["provenance"][0]["document_version"] = "unknown-version"
-    index_path.write_text(json.dumps(index), encoding="utf-8")
+    _write_index(index_path, index)
 
     with pytest.raises(ValueError, match="unknown source version"):
         EvidenceRetriever(index_path, manifest).search_claim(
@@ -312,3 +338,77 @@ def test_claim_search_rejects_invalid_citation_provenance(tmp_path: Path) -> Non
 
 def test_source_adapter_does_not_turn_raw_text_into_curated_techniques() -> None:
     assert EvidenceKnowledgeSource().get_techniques() == []
+
+
+def test_hybrid_update_reuses_embeddings_and_retrieves_paraphrase(tmp_path, monkeypatch):
+    from spectro_ai import providers
+    from spectro_ai.providers import RagSettings
+
+    root = tmp_path / "repo"
+    (root / "materials").mkdir(parents=True)
+    documents = root / "documents"
+    documents.mkdir()
+    (documents / "reference.md").write_text(
+        "# Optical interference\n\n"
+        "Suspended particles deflect the incoming beam, lowering transmitted intensity.",
+        encoding="utf-8",
+    )
+    manifest = _manifest(root, [])
+    index = root / "index.sqlite3"
+    monkeypatch.setattr(providers, "embedding_identity", lambda settings: "test-model-digest")
+
+    monkeypatch.setattr(
+        providers, "embed_texts", lambda settings, texts: [[1.0, 0.0] for _ in texts]
+    )
+    retriever = EvidenceRetriever(index, manifest, settings=RagSettings(), documents_path=documents)
+    first = retriever.update_knowledge_base()
+    assert first["documents"] == {"new": 1, "updated": 0, "removed": 0, "unchanged": 0}
+    assert first["embeddings"]["new"] >= 1
+    assert retriever.knowledge_status()["ready"]
+
+    snapshot = retriever.snapshot()
+    second = retriever.update_knowledge_base()
+    assert second["embeddings"]["new"] == 0
+    assert second["embeddings"]["reused"] == first["chunks"]
+    hits = retriever.search(CustomerUseCase(measurement_objective="assess liquid clarity"))
+    assert hits and hits[0].source_id.startswith("D")
+    assert hits[0].page_or_section.startswith("section=Optical interference")
+    assert snapshot.index_metadata()["revision"] != retriever.index_metadata()["revision"]
+
+
+def test_hybrid_update_failure_preserves_committed_index(tmp_path, monkeypatch):
+    from spectro_ai import providers
+    from spectro_ai.providers import ProviderError, RagSettings
+
+    root = tmp_path / "repo"
+    (root / "materials").mkdir(parents=True)
+    documents = root / "documents"
+    documents.mkdir()
+    (documents / "one.txt").write_text("stable spectroscopy reference", encoding="utf-8")
+    manifest = _manifest(root, [])
+    index = root / "index.sqlite3"
+    monkeypatch.setattr(providers, "embedding_identity", lambda settings: "test-model-digest")
+    monkeypatch.setattr(
+        providers, "embed_texts", lambda settings, texts: [[1.0, 0.0] for _ in texts]
+    )
+    retriever = EvidenceRetriever(index, manifest, RagSettings(), documents)
+    retriever.update_knowledge_base()
+    previous = index.read_bytes()
+    (documents / "two.txt").write_text("new spectroscopy reference", encoding="utf-8")
+    monkeypatch.setattr(
+        providers,
+        "embed_texts",
+        lambda settings, texts: (_ for _ in ()).throw(ProviderError("offline")),
+    )
+    with pytest.raises(ProviderError, match="offline"):
+        retriever.update_knowledge_base()
+    assert index.read_bytes() == previous
+
+
+def test_chunking_preserves_sentence_and_word_boundaries():
+    text = "First scientific sentence. " + ("word " * 55) + "Second sentence follows."
+    chunks = _split_text(text, maximum=200, overlap=30)
+    assert all(len(chunk) <= 200 for chunk in chunks)
+    assert all(not chunk.startswith("ord ") for chunk in chunks)
+    assert all(not chunk.endswith("wor") for chunk in chunks)
+    assert any(chunk.endswith(".") for chunk in chunks[:-1])

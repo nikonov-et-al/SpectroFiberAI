@@ -2,6 +2,7 @@
 
 | Date | Decision | Reason / revisit trigger |
 | --- | --- | --- |
+| 2026-10-18 | Unify assessment retrieval in one SQLite knowledge base with Ollama embeddings, BM25 and RRF; remove standalone Document Q&A | Reuse stored vectors and provenance, index only on explicit updates, preserve prior index on failure and bind assessments to immutable revisions. Exact cosine scan avoids another service; scientific acceptance remains independent. |
 | 2026-10-18 | Replace offline parser/recommender/fallback with sole evidence-grounded Ollama/OpenAI pipeline | User-approved architecture supersedes earlier baseline decisions. Keep deterministic guardrails and network-free tests; provider failures are errors, scientific gaps abstain. Expert scientific gate remains open. |
 | 2026-10-17 | Keep grounded assessment as an opt-in Ollama adapter over the validated customer case and allowlisted evidence index; report abstention and fallback distinctly | Preserve offline baseline and customer corrections, while citations remain tied to retrieved source excerpts; lexical screening is only a necessary check, not semantic validation. |
 | 2026-10-17 | Add separate allowlisted AFS evidence index with deterministic local BM25 | Preserve citations and review status without turning retrieved text into technique rules; revisit after expert review and measured retrieval gaps. |
