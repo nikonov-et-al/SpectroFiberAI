@@ -1,14 +1,15 @@
 # Architecture
 
-Customer enquiry → structured LLM extraction → local AFS retrieval → structured LLM
-technical assessment → deterministic checks → expert-reviewable report.
+Customer enquiry → structured LLM extraction → local AFS retrieval → structured
+application-evidence assessment → technical synthesis → deterministic checks →
+expert-reviewable report.
 
 ## Boundaries
 
 Streamlit owns presentation and session state. `assess_problem` extracts requirements
 and invokes `assess_use_case`; corrected requirements enter `assess_use_case` directly.
 Both entry points use same provider policy, retrieval, validation, and report contracts.
-`SPECTRO_AI_PROVIDER=ollama|openai` selects both generation stages; default Ollama.
+`SPECTRO_AI_PROVIDER=ollama|openai` selects generation stages; default Ollama.
 There is no offline parser, rule-based recommender, or fallback provider.
 
 Provider adapters remain in `providers.py`; SDK imports are lazy. Shared prompts live
@@ -44,10 +45,26 @@ Validation removes unsupported claims individually and replaces accepted paraphr
 with attributed literal source observations. A secondary claim failure does not erase
 an otherwise supported exploratory technique. Bounded claim-specific retrieval can
 locate a missing quotation in the same validated corpus; repaired links retain actual
-source/page/version provenance. Lexical support remains a necessary screening check,
-not scientific validation. Production readiness is recorded separately from provisional
-feasibility. Study plans compare retained methods on representative samples and
-independent batch/run holdouts; combined methods remain optional comparisons.
+source/page/version provenance. New evidence must pass the application assessment
+before repairing a claim. Lexical matching is no longer the application authority.
+Production readiness is recorded separately from provisional feasibility. Existing
+study safeguards retain independent batch/run holdouts and optional combined-method
+comparisons; exploratory candidates do not automatically enter experiment selection.
+
+`evidence_assessment.py` keeps reference checks and support permissions independent
+of providers and Streamlit. Typed observations separate source entailment, application
+relationship, context availability and source review status. Source-backed engineering
+bridges permit exploratory consideration without exact precedent. Final presentation
+uses bounded assessed conclusions and verified quotations, not arbitrary recommendation
+prose merely carrying an observation ID. Model-assessed semantics are not guaranteed
+by deterministic checks or agreement between generation stages.
+
+Evidence budgets preserve complete supplied bundles, including qualifications.
+Child-only context does not imply the source has no further limitations. Parent
+expansion remains off by default. Existing index schema/retrieval interfaces remain
+unchanged. Reports carry evidence-assessment audit data; legacy reports remain readable
+without gaining retrospective semantic validation. Step 2 owns ranking and selector
+improvements. See PLAN_EVIDENCE_ASSESSMENT.md for tests and outstanding scientific gates.
 
 ## Presentation and compatibility
 

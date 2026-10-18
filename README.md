@@ -347,3 +347,42 @@ production readiness. Missing specifications become prioritized study questions.
 Claim-specific searches use the same allowlisted, version-checked evidence index;
 additional folder documents enter through Update Knowledge Base with unreviewed metadata;
 curated AFS provenance remains in the manifest.
+
+### Application-aware evidence assessment
+
+Assessment now evaluates source observations and their application conditions before
+technical synthesis. Reports distinguish application-supported consideration,
+scientifically reasoned exploration, and unsupported suggestions. Novel applications
+can be explored through an explicit source-backed mechanism, customer-linked
+hypothesis, transfer gaps and next checks; exact application precedent is not required.
+Exploratory consideration does not automatically select a measurement technique for
+the experiment. Ranking and experiment-selection improvements remain Step 2.
+
+The evidence pass uses the selected Ollama/OpenAI provider and existing context,
+output and timeout settings. It adds one request plus at most one structural retry;
+optional claim repair can add one augmented evidence assessment. Whole source bundles
+retain available qualifications. Parent expansion stays off by default: missing
+surrounding context remains unavailable, never a confirmed application match.
+Successful augmented assessment rebuilds synthesis once against its new IDs; repair
+does not recurse. This is additional local runtime cost, not a quality guarantee.
+
+Exact quotes and linked observation IDs establish traceability, not scientific truth.
+Semantic entailment and transfer reasoning are model-assessed and need expert review.
+Unreviewed technical sources remain usable provisionally with visible warnings;
+source review status is independent of application relevance. Old report JSON remains
+readable without retrospective evidence assessment; new reports include the assessment
+audit trail. Index schema and retrieval interfaces are unchanged; no reindex is needed.
+See [Step 1 plan and acceptance](PLAN_EVIDENCE_ASSESSMENT.md).
+
+Custom Python assessors must accept the keyword-only `evidence_assessment` argument
+on `assess(use_case, evidence, *, evidence_assessment)`. Tests may inject an
+`evidence_assessor(use_case, evidence, *, allow_retry=True)` callable into
+`assess_use_case`; its output still passes host reference and permission checks.
+There is no legacy lexical bypass when that pass fails. Review protocol and source
+boundaries are in [evidence assessment](docs/EVIDENCE_ASSESSMENT.md).
+
+Scientific acceptance remains blocked: the local S02 smoke still missed the polymer
+qualification. The generic permission guard withheld the resulting support record
+and left the experiment technique unset. Passing software tests does not establish
+correct application interpretation; further model tuning stopped after two focused
+repairs. Details and runtime evidence are in the review protocol above.

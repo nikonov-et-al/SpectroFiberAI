@@ -183,3 +183,27 @@ claims. Feasibility plans compare retained techniques with independent reference
 representative variation, held-out evaluation and customer-agreed acceptance criteria.
 These are software safeguards and study-design heuristics, not scientific acceptance.
 Challenge facts, hardware capability and customer performance remain unconfirmed.
+
+## Step 1 — application-aware evidence assessment
+
+The evidence pass structures source statements, application conditions, customer
+comparisons, conflicts and transfer gaps before synthesis. It distinguishes
+application-supported options from reasoned exploratory hypotheses; unsupported
+suggestions cannot become recommendations. An explicit scientific bridge can justify
+exploration without exact precedent, but exploratory status does not automatically
+choose the experiment technique. Candidate ranking and selector improvements remain
+Step 2. Source review warnings remain separate from applicability.
+
+Software tests and local runtime checks do not establish D01/S02 scientific acceptance.
+Human review must inspect S01 feed-frame evidence, S02 hot-polymer transfer, unfamiliar
+novel-application bridges and missing source qualifications. Keep Phase 3 and existing
+retrieval/parser/context usefulness gates pending. No challenge facts or hardware
+performance have been added. Track this task in PLAN_EVIDENCE_ASSESSMENT.md; accepted
+implementation history belongs in HISTORY.md.
+
+Software acceptance: 268 offline tests, Ruff lint/format and temporary Streamlit
+200/ok health passed. Scientific acceptance is blocked: the final pinned local S02
+generation still missed the polymer qualification; a generic method-description
+guard withheld support and experiment selection. Stop further prompt tuning after
+two focused repair attempts; a separately reviewed approach and human review are
+required. See docs/EVIDENCE_ASSESSMENT.md for exact source/runtime boundaries.
