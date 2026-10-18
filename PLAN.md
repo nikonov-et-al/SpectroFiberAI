@@ -41,15 +41,6 @@ safe Markdown/context/other-format work. No further tuning under this request.
 
 **Acceptance:** reproducible test results and reviewed AFS examples exist. Software success alone does not close scientific acceptance gates.
 
-### 5. Broader format improvements
-
-- Extend shared block packing to DOCX headings/paragraphs/tables, XLSX worksheets/rows/explicit headers, and TXT paragraphs with original line locations.
-- Preserve cell positions, empty cells and customer units; do not infer absent headers or scientific meaning.
-- Keep curated YAML technique profiles as structured records.
-- Apply same provenance, vector-reuse, context-window and scientific-context tests.
-
-**Acceptance:** format-specific regressions pass, existing examples/exports remain usable, and demo smoke succeeds.
-
 Each milestone requires targeted tests, full pytest, Ruff lint/format, demo smoke,
 Sol review and a Conventional Commit. Preserve unrelated work. Copy each accepted
 milestone's exact original text into HISTORY.md before removing it here.

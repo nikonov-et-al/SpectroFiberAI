@@ -19,6 +19,10 @@ heading extraction failed the promotion gate after two focused configuration
 attempts. Bounded parent context is implemented with 30% reserved retrieval capacity,
 same-source block windows and exact context quotation provenance. Parent expansion defaults off until regression and real-source
 review gates pass; this work does not establish scientific acceptance.
+DOCX/XLSX/TXT also use source-block packing with explicit headers and original
+paragraph/row/line positions. The offline scientific-context tests cover repeated
+values under different operating conditions, exact citations, same-source
+limitations, tampering and provider budgets. Real AFS usefulness remains unaccepted.
 
 - Python 3.14 with uv-managed locked dependencies.
 - Typed requirements, candidates, evidence, feasibility plans, reports.

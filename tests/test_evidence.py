@@ -103,7 +103,18 @@ def test_reindex_tracks_page_lines_and_worksheet_rows(tmp_path: Path) -> None:
 
     assert result["files_indexed"] == 2
     assert "lines 1-2" in locators
-    assert "worksheet=methods rows=1-2" in locators
+    worksheet_provenance = [
+        provenance
+        for chunk in chunks
+        for provenance in chunk["provenance"]
+        if provenance["filename"] == "table.xlsx"
+    ]
+    assert "worksheet=methods rows=1-1; worksheet=methods rows=2-2" in locators
+    assert {
+        location["locator"]
+        for provenance in worksheet_provenance
+        for location in provenance["source_locations"]
+    } == {"worksheet=methods rows=1-1", "worksheet=methods rows=2-2"}
     retrieved = EvidenceRetriever(index_path, manifest, mode="bm25").search(
         CustomerUseCase(source_text="near infrared ATR spectroscopy"), limit=3
     )
@@ -122,9 +133,12 @@ def test_allowlisted_docx_indexes_sections_not_evaluation_material(tmp_path: Pat
     reindex_sources(manifest, index_path)
     index = _read_index(index_path)
 
-    assert {p["page_or_section"] for c in index["chunks"] for p in c["provenance"]} == {
-        "section=Methods"
+    provenance = [p for c in index["chunks"] for p in c["provenance"]]
+    assert {p["page_or_section"] for p in provenance} == {
+        "paragraph=1; paragraph=2",
+        "table=1 row=1",
     }
+    assert all(p["source_locations"] for p in provenance)
     assert any("Sample | Oil" in chunk["text"] for chunk in index["chunks"])
 
 

@@ -168,6 +168,15 @@ table rows and explicit headers. Index schema 3 records source blocks separately
 from packed retrieval passages, including exact source spans and locations.
 Titles and heading paths remain metadata; embedding input is still passage text.
 
+TXT uses paragraphs with original line ranges. DOCX preserves heading ancestry,
+paragraphs, table/cell positions and explicitly marked repeating headers. XLSX
+preserves worksheet row numbers and empty cell positions; only declared table
+headers are repeated. Cached cell values are read without formula evaluation or
+number-format rendering. Unit strings in source values remain text; missing units
+and header meanings are never inferred. Curated YAML profiles stay structured.
+Normal updates retain existing evidence IDs only for matching passage text and
+citation provenance; changed passages receive content/location-bound IDs.
+
 The PDF default remains `pypdf`. Docling 2.140+ is available explicitly through
 the `rag` extra, with CPU layout/table models and validated heading inference:
 

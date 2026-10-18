@@ -734,3 +734,27 @@ Sol reviewed disabled-by-default parent expansion, 30% reservation before child 
 Acceptance: 191 tests passed; `uv run ruff check .` passed; `uv run ruff format --check .` passed (61 files); Streamlit HTTP 200/ok. Full tests include AppTest and real synthetic Markdown ingestion through mocked assessment/export, plus tamper, budget and same-source limitation regressions. Real AFS BM25 comparison harness executes without generation or model requests.
 
 Deviation: none to feature behavior. Real AFS usefulness/default promotion remains independent and pending in milestone 4; parent expansion remains false.
+
+
+## Completed — 2026-10-18 — Structure-aware milestone 5
+
+### Original milestone text
+
+### 5. Broader format improvements
+
+- Extend shared block packing to DOCX headings/paragraphs/tables, XLSX worksheets/rows/explicit headers, and TXT paragraphs with original line locations.
+- Preserve cell positions, empty cells and customer units; do not infer absent headers or scientific meaning.
+- Keep curated YAML technique profiles as structured records.
+- Apply same provenance, vector-reuse, context-window and scientific-context tests.
+
+**Acceptance:** format-specific regressions pass, existing examples/exports remain usable, and demo smoke succeeds.
+
+### Implementation and verification
+
+Sol reviewed shared DOCX/XLSX/TXT block packing: explicit heading/header metadata, paragraph/worksheet/row/line locations, empty cell positions, blank-row handling, side-by-side table handling, literal units and cached workbook values. Curated YAML remains unchanged. Regression coverage exercises format structure, canonical context and vector reuse across parser fingerprint changes.
+
+Final compatibility audit also corrected a pre-existing evidence-ID weakness: normal updates reuse IDs only for matching text and citation provenance; changed parser passages receive deterministic content/location-bound IDs. Authorized tests now assert precise per-row/paragraph/table source locators.
+
+Acceptance: 200 tests passed; Ruff lint passed; Ruff format check passed (63 files); Streamlit HTTP 200/ok. This includes the final synthetic PDF repeated-value/operating-condition provenance test.
+
+Deviation: cached raw XLSX values are preserved; formulas are not evaluated and display number formats are not rendered. No inferred units or header meanings. Parser/default and real AFS usefulness gates remain pending independently.

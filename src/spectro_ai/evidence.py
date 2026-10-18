@@ -41,8 +41,11 @@ from spectro_ai.structure import (
     SectionSpec,
     SourceUnit,
     StructuredSource,
+    docx_source,
     markdown_source,
     pack_source,
+    txt_source,
+    xlsx_source,
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -103,6 +106,22 @@ _SYNONYMS = {
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _evidence_identity_key(text: str, provenance: dict[str, Any]) -> str:
+    identity = {
+        "text": text,
+        "source_id": provenance.get("source_id"),
+        "filename": provenance.get("filename"),
+        "document_version": provenance.get("document_version"),
+        "page_or_section": provenance.get("page_or_section"),
+        "source_locations": provenance.get("source_locations", []),
+        "section_id": provenance.get("section_id"),
+        "heading_path": provenance.get("heading_path", []),
+        "block_ids": provenance.get("block_ids") or [provenance.get("block_id")],
+        "block_spans": provenance.get("block_spans"),
+    }
+    return json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _embedding_config(settings: Any, identity: str, dimension: int | None = None) -> dict[str, Any]:
@@ -181,9 +200,9 @@ def _extraction_fingerprint(chunk_size: int, chunk_overlap: int, pdf_backend: st
         "extractors": {
             "pdf": {"backend": pdf_backend, "version": parser_version},
             "markdown": "markdown-structure-v1",
-            "txt": "txt-v1",
-            "docx": "docx-v1",
-            "xlsx": "xlsx-v1",
+            "txt": "txt-paragraphs-lines-v2",
+            "docx": "docx-structure-v2",
+            "xlsx": "xlsx-structure-v2",
         },
         "docling": (
             {
@@ -1035,6 +1054,21 @@ def _update_index(
         old_meta, old_chunks = {}, {}
     if old_meta.get("schema_version") not in {2, _INDEX_SCHEMA_VERSION}:
         old_chunks = {}
+    old_evidence_ids: dict[str, list[str]] = {}
+    for old in old_chunks.values():
+        old_chunk = old.get("chunk", {})
+        old_text = old_chunk.get("text")
+        if not isinstance(old_text, str):
+            continue
+        for old_provenance in old_chunk.get("provenance", []):
+            if not isinstance(old_provenance, dict) or not isinstance(
+                old_provenance.get("evidence_id"), str
+            ):
+                continue
+            key = _evidence_identity_key(old_text, old_provenance)
+            old_evidence_ids.setdefault(key, []).append(old_provenance["evidence_id"])
+    for matching_ids in old_evidence_ids.values():
+        matching_ids.sort()
     settings = settings or providers.RagSettings.from_env()
     chunk_size = int(os.getenv("SPECTRO_RAG_CHUNK_SIZE", _CHUNK_SIZE))
     chunk_overlap = int(os.getenv("SPECTRO_RAG_CHUNK_OVERLAP", _CHUNK_OVERLAP))
@@ -1103,6 +1137,18 @@ def _update_index(
             version = _sha256(content)
             if path.suffix.casefold() == ".md":
                 structured = markdown_source(path.read_text(encoding="utf-8-sig"))
+                passages = pack_source(structured, chunk_size, chunk_overlap, _split_text)
+                empty_pages, poor_pages = structured.empty_pages, structured.poor_pages
+            elif path.suffix.casefold() == ".txt":
+                structured = txt_source(path.read_text(encoding="utf-8-sig"))
+                passages = pack_source(structured, chunk_size, chunk_overlap, _split_text)
+                empty_pages, poor_pages = structured.empty_pages, structured.poor_pages
+            elif path.suffix.casefold() == ".docx":
+                structured = docx_source(path)
+                passages = pack_source(structured, chunk_size, chunk_overlap, _split_text)
+                empty_pages, poor_pages = structured.empty_pages, structured.poor_pages
+            elif path.suffix.casefold() == ".xlsx":
+                structured = xlsx_source(path)
                 passages = pack_source(structured, chunk_size, chunk_overlap, _split_text)
                 empty_pages, poor_pages = structured.empty_pages, structured.poor_pages
             elif path.suffix.casefold() == ".pdf" and pdf_backend == "docling":
@@ -1252,7 +1298,6 @@ def _update_index(
                     "chunk_id": chunk_id,
                 },
             )
-            evidence_id = f"{source_id}-{path.stem}-{version[:12]}-{number:04d}"
             span_by_unit: dict[int, tuple[int, int]] = {}
             for span in passage.spans:
                 previous = span_by_unit.get(span.unit_index)
@@ -1292,7 +1337,6 @@ def _update_index(
             if any(page and f"p.{page.group(1)}" in poor_pages for page in page_matches):
                 review = f"{review}; poor_extraction_needs_manual_review"
             provenance = {
-                "evidence_id": evidence_id,
                 "source_id": source_id,
                 "document_id": document_id,
                 "document_version": version,
@@ -1316,6 +1360,15 @@ def _update_index(
                 "heading_path": list(structured.sections[passage.section_key].heading_path),
                 "oversized": passage.oversized,
             }
+            identity_key = _evidence_identity_key(excerpt, provenance)
+            legacy_id = f"{source_id}-{path.stem}-{version[:12]}-{number:04d}"
+            existing_ids = old_evidence_ids.get(identity_key, [])
+            if existing_ids:
+                evidence_id = existing_ids.pop(0)
+            else:
+                identity_digest = _sha256(identity_key.encode("utf-8"))[:16]
+                evidence_id = f"{legacy_id}-{identity_digest}"
+            provenance["evidence_id"] = evidence_id
             if provenance not in item["provenance"]:
                 item["provenance"].append(provenance)
     pending = [
